@@ -1,9 +1,11 @@
-"""Step 1 demo: use IK to reach the cube, grab it, and lift it.
+"""Pick the cube and place it in the box, using IK waypoints and checks between segments.
 
 Run with the 3D viewer:   python demo_reach.py
 Run without a window:     python demo_reach.py --headless   (prints a report)
+Try a hard start pose:    python demo_reach.py --x 0.5 --y 0.1 --yaw 45
+Old behaviour (baseline): python demo_reach.py --yaw 45 --no-align --retries 0 --ik-restarts 0
 
-Placing the cube in the box is left as your exercise. See README.md.
+eval_place.py runs this many times with random cube poses and reports the success rate.
 """
 import argparse
 import time
@@ -12,81 +14,102 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from ik import solve_ik
-from scene import GRIPPER_ACTUATOR, TCP_SITE, arm_qpos_ids, build_model
+from ik import DOWN, solve_ik, solve_ik_multistart
+from scene import (CUBE_START, GRIPPER_ACTUATOR, TCP_SITE, arm_qpos_ids, build_model, cube_yaw,
+                   place_cube, yaw_quat)
 
 OPEN, CLOSED = 0.0, 255.0
+IK_POS_TOL = 1e-3            # m: a waypoint farther off than this means the plan can't be trusted
+IK_ROT_TOL = np.radians(1.0)
+LIFT_MIN = 0.10              # m: after "lift" the cube must have risen at least this much
+HOLD_MAX = 0.04              # m: cube centre farther than this from the TCP = no longer in the hand
+SETTLE_STEPS = 500
+
+OUTCOMES = ["OK", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
 
 
-def make_plan(model, data):
-    """List of (arm joint targets, gripper command, seconds) segments."""
-    cube = data.body("cube").xpos.copy()  # ground-truth pose from sim (we'll replace this with a camera later)
+def grasp_quat(psi):
+    """Gripper pointing straight down, turned by `psi` rad about the world z-axis."""
+    q = np.empty(4)
+    mujoco.mju_mulQuat(q, yaw_quat(psi), DOWN)
+    return q
+
+
+def grasp_angles(cube_yaw, align=True):
+    """Candidate gripper turns (rad) that put the fingers square to the cube's faces, best first.
+
+    A cube looks the same every 90 deg, so there are two distinct grasps: on one pair of
+    faces (turn within +-45 deg) or on the other pair (that turn +-90 deg). The smaller
+    wrist turn is tried first; the other is the fallback when the fingers would hit
+    something, e.g. the box wall right next to the cube.
+    Without `align` the gripper always comes straight down and closes on whatever is there.
+    """
+    if not align:
+        return [0.0]
+    psi = (cube_yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
+    return [psi, psi - np.sign(psi or 1) * np.pi / 2]
+
+
+def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=None):
+    """Plan the pick and place. Returns (segments, ok, gripper quat).
+
+    Each segment is (name, arm joint targets, gripper command, seconds). Grasp angles are
+    tried in turn until one gives a full plan where every waypoint converges collision-free.
+    """
     drop = data.site("box_target").xpos.copy()  # 5 cm above the box walls, centred over the box
-    carry_z = cube[2] + 0.20  # travel height: well above the box walls (6 cm)
+    carry_z = cube_pos[2] + 0.20  # travel height: well above the box walls (6 cm)
     above_box = np.array([drop[0], drop[1], carry_z])
+    # Only the two big moves at safe height may jump to a different arm configuration (IK restarts).
+    # The short moves near the table must continue smoothly from the previous pose; jumping
+    # there would sweep the arm through the table on the way.
     waypoints = [
-        # --- pick ---
-        ("above cube", cube + [0, 0, 0.15], OPEN, 2.0),
-        ("down to cube", cube + [0, 0, 0.0], OPEN, 1.5),
-        ("close gripper", cube + [0, 0, 0.0], CLOSED, 1.0),
-        ("lift", cube + [0, 0, 0.20], CLOSED, 2.0),
+        # --- pick ---         target                   gripper  s    big move
+        ("above cube",     cube_pos + [0, 0, 0.15], OPEN,   2.0, True),
+        ("down to cube",   cube_pos,                OPEN,   1.5, False),
+        ("close gripper",  cube_pos,                CLOSED, 1.0, False),
+        ("lift",           cube_pos + [0, 0, 0.20], CLOSED, 2.0, False),
         # --- place ---
-        ("carry to box", above_box, CLOSED, 2.5),   # move at a safe height, never sideways near walls
-        ("lower into box", drop, CLOSED, 1.5),      # straight down, so the cube clears the walls
-        ("release", drop, OPEN, 1.0),               # open while still; the cube drops the last few cm
-        ("retreat", above_box, OPEN, 1.5),          # straight up, so the fingers don't drag the cube
+        ("carry to box",   above_box,               CLOSED, 2.5, True),   # at a safe height, never sideways near walls
+        ("lower into box", drop,                    CLOSED, 1.5, False),  # straight down, so the cube clears the walls
+        ("release",        drop,                    OPEN,   1.0, False),  # open while still; the cube drops the last few cm
+        ("retreat",        above_box,               OPEN,   1.5, False),  # straight up, so the fingers don't drag the cube
     ]
-    plan, q_prev = [], data.qpos[arm_qpos_ids(model)].copy()
-    for name, target, grip, dur in waypoints:
-        q, pos_err, rot_err, iters = solve_ik(model, data, TCP_SITE, target, q_init=q_prev)
-        print(f"IK '{name}': pos err {pos_err * 1000:.2f} mm, rot err {np.degrees(rot_err):.2f} deg, {iters} iters")
-        plan.append((name, q, grip, dur))
-        q_prev = q
-    return plan
+    check = ik_restarts > 0  # the baseline (no restarts) also skips collision checks, like the original
+    for psi in grasp_angles(cube_yaw, align):
+        quat = grasp_quat(psi)
+        plan, ok, q_prev = [], True, data.qpos[arm_qpos_ids(model)].copy()
+        if log:
+            log(f"-- planning with gripper turned {np.degrees(psi):+.0f} deg")
+        for name, target, grip, dur, big_move in waypoints:
+            q, pos_err, rot_err, iters, wp_ok = solve_ik_multistart(
+                model, data, TCP_SITE, target, quat, q_init=q_prev, restarts=ik_restarts if big_move else 0,
+                pos_tol=IK_POS_TOL, rot_tol=IK_ROT_TOL, check_collisions=check)
+            if log:
+                log(f"IK '{name}': pos err {pos_err * 1000:.2f} mm, rot err {np.degrees(rot_err):.2f} deg, "
+                    f"{iters} iters{'' if wp_ok else '  <- FAILED'}")
+            ok &= wp_ok
+            plan.append((name, q, grip, dur))
+            q_prev = q
+        if ok:
+            break
+    return plan, ok, quat
 
 
-def run(headless):
-    model, data = build_model()
-    gripper = model.actuator(GRIPPER_ACTUATOR).id
-    plan = make_plan(model, data)
+def run_plan(model, data, plan, step):
+    """Send a smoothly blended control target every physics step; yield each segment's name when it ends."""
+    q_from = data.ctrl[:6].copy()
+    for name, q_to, grip, dur in plan:
+        steps = int(dur / model.opt.timestep)
+        for k in range(steps):
+            s = (k + 1) / steps
+            s = 3 * s**2 - 2 * s**3  # smoothstep: zero velocity at start and end
+            step(q_from + s * (q_to - q_from), grip)
+        q_from = q_to
+        yield name
 
-    def segments():
-        """Yield a control target every physics step, smoothly blending between waypoints."""
-        q_from = data.ctrl[:6].copy()
-        for name, q_to, grip, dur in plan:
-            steps = int(dur / model.opt.timestep)
-            for k in range(steps):
-                s = (k + 1) / steps
-                s = 3 * s**2 - 2 * s**3  # smoothstep: zero velocity at start and end
-                yield name, q_from + s * (q_to - q_from), grip
-            q_from = q_to
 
-    def step(q_cmd, grip):
-        data.ctrl[:6] = q_cmd
-        data.ctrl[gripper] = grip
-        mujoco.mj_step(model, data)
-
-    if headless:
-        for name, q_cmd, grip in segments():
-            step(q_cmd, grip)
-        for _ in range(500):  # let it settle
-            step(q_cmd, grip)
-    else:
-        with mujoco.viewer.launch_passive(model, data) as viewer:
-            for name, q_cmd, grip in segments():
-                if not viewer.is_running():
-                    return
-                t0 = time.time()
-                step(q_cmd, grip)
-                viewer.sync()
-                time.sleep(max(0, model.opt.timestep - (time.time() - t0)))  # real-time pace
-            while viewer.is_running():  # hold the final pose until you close the window
-                step(q_cmd, grip)
-                viewer.sync()
-                time.sleep(model.opt.timestep)
-
-    print(f"TCP final: {data.site(TCP_SITE).xpos.round(3)}  cube final: {data.body('cube').xpos.round(3)}")
-    print("Cube in box -> PLACE OK" if cube_in_box(data) else "Cube not in box -> PLACE FAILED")
+def cube_in_hand(data):
+    return np.linalg.norm(data.body("cube").xpos - data.site(TCP_SITE).xpos) < HOLD_MAX
 
 
 def cube_in_box(data, inner_half=0.07):
@@ -95,7 +118,117 @@ def cube_in_box(data, inner_half=0.07):
     return abs(rel[0]) < inner_half and abs(rel[1]) < inner_half and rel[2] < 0.05
 
 
-if __name__ == "__main__":
+def ground_truth(data):
+    """Perfect perception: the cube pose straight from the simulator."""
+    return data.body("cube").xpos.copy(), cube_yaw(data)
+
+
+METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm"]
+
+
+def wrap_cube_angle(a):
+    """Wrap an angle (rad) to [-45, 45) deg: for a cube, rotations 90 deg apart look the same."""
+    return (a + np.pi / 4) % (np.pi / 2) - np.pi / 4
+
+
+def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
+                   metrics=None):
+    """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
+
+    `step(q_cmd, grip)` advances the simulation by one physics step.
+    `perceive(data)` returns the cube (position, yaw) that the planner sees.
+
+    Pass a dict as `metrics` to also get continuous measurements (NaN when not reached).
+    Pass/fail hides how close a run came to failing; these show the margin:
+      grasp_offset_mm   horizontal distance cube centre <-> fingertip centre right after closing
+      grasp_twist_deg   how far closing the fingers rotated the cube (0 = fingers met it square)
+      place_error_mm    final horizontal distance of the cube from the box centre (OK runs)
+    """
+    say = log or (lambda msg: None)
+    m = metrics if metrics is not None else {}
+    m.update({k: np.nan for k in METRICS})
+    z0 = data.body("cube").xpos[2]
+    for attempt in range(1, retries + 2):
+        cube_pos, yaw = perceive(data)
+        plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
+        if not ik_ok:
+            return "IK_FAIL", attempt
+        for name in run_plan(model, data, plan, step):
+            if name == "down to cube":
+                yaw_before_close = cube_yaw(data)
+            if name == "close gripper":
+                m["grasp_offset_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.site(TCP_SITE).xpos)[:2])
+                m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))
+            if name == "lift" and data.body("cube").xpos[2] < z0 + LIFT_MIN:
+                say(f"attempt {attempt}: cube did not come up -> grasp missed")
+                break
+            if name in ("carry to box", "lower into box") and not cube_in_hand(data):
+                return "DROPPED", attempt
+        else:
+            for _ in range(SETTLE_STEPS):
+                step(plan[-1][1], OPEN)
+            if not cube_in_box(data):
+                return "MISSED_BOX", attempt
+            m["place_error_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.body("box").xpos)[:2])
+            return "OK", attempt
+
+        # Grasp missed: open, back straight up, and look again before the next attempt.
+        up = data.site(TCP_SITE).xpos + [0, 0, 0.10]
+        q_up, *_ = solve_ik(model, data, TCP_SITE, up, quat, q_init=data.qpos[arm_qpos_ids(model)])
+        for _ in run_plan(model, data, [("back off", q_up, OPEN, 1.0)], step):
+            pass
+    return "GRASP_MISS", attempt
+
+
+def make_stepper(model, data, viewer=None):
+    """Return step(q_cmd, grip). With a viewer, it also draws and runs in real time."""
+    gripper = model.actuator(GRIPPER_ACTUATOR).id
+
+    def step(q_cmd, grip):
+        t0 = time.time()
+        data.ctrl[:6] = q_cmd
+        data.ctrl[gripper] = grip
+        mujoco.mj_step(model, data)
+        if viewer is not None:
+            if not viewer.is_running():
+                raise SystemExit
+            viewer.sync()
+            time.sleep(max(0, model.opt.timestep - (time.time() - t0)))  # real-time pace
+    return step
+
+
+def run_in_viewer(model, data, **kwargs):
+    """Run pick_and_place in the 3D viewer, then hold the final pose until the window closes."""
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        step = make_stepper(model, data, viewer)
+        result = pick_and_place(model, data, step, **kwargs)
+        print(f"Outcome: {result[0]} after {result[1]} attempt(s). Close the window to exit.")
+        while viewer.is_running():
+            step(data.ctrl[:6].copy(), data.ctrl[-1])
+    return result
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--headless", action="store_true")
-    run(parser.parse_args().headless)
+    parser.add_argument("--x", type=float, default=CUBE_START[0])
+    parser.add_argument("--y", type=float, default=CUBE_START[1])
+    parser.add_argument("--yaw", type=float, default=0.0, help="cube yaw in degrees")
+    parser.add_argument("--no-align", action="store_true", help="baseline: ignore cube yaw when grasping")
+    parser.add_argument("--retries", type=int, default=1, help="re-grasp attempts after a missed grasp")
+    parser.add_argument("--ik-restarts", type=int, default=8, help="extra IK starting poses if IK gets stuck")
+    args = parser.parse_args()
+
+    model, data = build_model()
+    place_cube(model, data, (args.x, args.y), np.radians(args.yaw))
+    kwargs = dict(align=not args.no_align, retries=args.retries, ik_restarts=args.ik_restarts, log=print)
+    if args.headless:
+        outcome, attempts = pick_and_place(model, data, make_stepper(model, data), **kwargs)
+        print(f"TCP final: {data.site(TCP_SITE).xpos.round(3)}  cube final: {data.body('cube').xpos.round(3)}")
+        print(f"Outcome: {outcome} after {attempts} attempt(s)")
+    else:
+        run_in_viewer(model, data, **kwargs)
+
+
+if __name__ == "__main__":
+    main()

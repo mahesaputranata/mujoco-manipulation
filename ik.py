@@ -1,19 +1,3 @@
-"""Damped least-squares (DLS) inverse kinematics, written from scratch.
-
-Goal: find arm joint angles q so the tool site reaches a target position and
-orientation.
-
-Idea (one iteration):
-    1. Forward kinematics: where is the tool now?            -> x(q)
-    2. Error to the target (3 position + 3 rotation numbers) -> e  (6,)
-    3. Jacobian: how the tool moves per joint velocity       -> J  (6 x 6)
-       e ≈ J dq   for a small joint change dq
-    4. Solve for dq. Plain inverse J^-1 blows up near singularities (e.g. arm
-       fully stretched), so we use the damped version:
-           dq = J^T (J J^T + λ² I)^-1 e
-       λ trades a little accuracy for a lot of stability.
-    5. q <- q + dq, clamp to joint limits, repeat until the error is tiny.
-"""
 import mujoco
 import numpy as np
 
@@ -72,3 +56,54 @@ def solve_ik(model, data, site_name, target_pos, target_quat=DOWN, q_init=None,
         scratch.qpos[qadr] = np.clip(q, lo, hi)
 
     return scratch.qpos[qadr].copy(), np.linalg.norm(err[:3]), np.linalg.norm(err[3:]), i
+
+
+def robot_hits_scene(model, data, q):
+    """True if the arm at joint angles `q` touches the floor or the box (touching the cube is fine)."""
+    scratch = mujoco.MjData(model)
+    scratch.qpos[:] = data.qpos
+    scratch.qpos[arm_qpos_ids(model)] = q
+    mujoco.mj_forward(model, scratch)
+    robot_root, cube = model.body("base").id, model.body("cube").id
+    for c in scratch.contact[:scratch.ncon]:
+        b1, b2 = model.geom_bodyid[c.geom1], model.geom_bodyid[c.geom2]
+        robot1, robot2 = model.body_rootid[b1] == robot_root, model.body_rootid[b2] == robot_root
+        if robot1 != robot2 and cube not in (b1, b2):
+            return True
+    return False
+
+
+def solve_ik_multistart(model, data, site_name, target_pos, target_quat=DOWN, q_init=None, restarts=8,
+                        pos_tol=1e-3, rot_tol=np.radians(1.0), check_collisions=True, seed=0):
+    """solve_ik, but if it gets stuck in a local minimum, retry from other starting poses.
+
+    DLS only follows the local gradient. On a big move (e.g. swinging the base ~100 deg) it
+    can wind a joint the long way round into its limit and stall. Tries, in order: q_init,
+    the home pose, then `restarts` random poses near home. A solution only counts if it
+    converges AND (with check_collisions) the arm doesn't touch the floor or box: IK alone
+    happily puts the elbow through the table. Among those, returns the one closest to q_init,
+    so the arm doesn't make needlessly large moves.
+
+    Returns (q, pos_err, rot_err, iters, ok). If nothing is ok, q is the closest miss.
+    """
+    from scene import HOME_QPOS
+
+    rng = np.random.default_rng(seed)  # fixed seed: the same target always gives the same answer
+    q_ref = data.qpos[arm_qpos_ids(model)] if q_init is None else np.asarray(q_init)
+    starts = [q_ref]
+    if restarts:
+        starts += [HOME_QPOS] + [HOME_QPOS + rng.uniform(-np.pi, np.pi, 6) * [1, 0.5, 0.5, 1, 1, 1]
+                                 for _ in range(restarts)]
+    good, fallback = [], None
+    for q0 in starts:
+        q, pos_err, rot_err, iters = solve_ik(model, data, site_name, target_pos, target_quat, q_init=q0)
+        converged = pos_err < pos_tol and rot_err < rot_tol
+        if converged and not (check_collisions and robot_hits_scene(model, data, q)):
+            if q0 is q_ref:
+                return q, pos_err, rot_err, iters, True  # the plain solve already worked: keep it
+            good.append((q, pos_err, rot_err, iters, True))
+        elif fallback is None or pos_err + rot_err < fallback[1] + fallback[2]:
+            fallback = (q, pos_err, rot_err, iters, False)
+    if good:
+        return min(good, key=lambda r: np.linalg.norm(r[0] - q_ref))
+    return fallback

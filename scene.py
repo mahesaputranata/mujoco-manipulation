@@ -1,9 +1,3 @@
-"""Builds the simulation scene: UR5e arm + Robotiq 2F-85 gripper, a cube, and an open box.
-
-The robot models come from MuJoCo Menagerie (third_party/menagerie). Instead of
-hand-merging XML files, we load each model as an MjSpec and attach the gripper
-to the arm's flange site in code.
-"""
 from pathlib import Path
 
 import mujoco
@@ -23,10 +17,13 @@ ARM_JOINTS = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+
 GRIPPER_ACTUATOR = "gripper/fingers_actuator"  # ctrl 0 = open, 255 = closed
 TCP_SITE = "gripper/pinch"  # tool centre point, between the fingertips
 
-CUBE_START = (0.45, 0.20, 0.025)
+CUBE_HALF = 0.025  # half the cube's edge length (m)
+CUBE_MASS = 0.1
+CUBE_START = (0.45, 0.20, CUBE_HALF)
 BOX_POS = (0.40, -0.30, 0.0)
 
 
@@ -47,7 +44,7 @@ def _add_open_box(world, name, pos, inner=0.14, wall=0.01, height=0.06):
     box.add_site(name=f"{name}_target", pos=[0, 0, height + 0.05], size=[0.01] * 3, rgba=[0, 1, 0, 0.3])
 
 
-def build_spec() -> mujoco.MjSpec:
+def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0) -> mujoco.MjSpec:
     arm = mujoco.MjSpec.from_file(str(MENAGERIE / "universal_robots_ur5e" / "ur5e.xml"))
     gripper = mujoco.MjSpec.from_file(str(MENAGERIE / "robotiq_2f85" / "2f85.xml"))
 
@@ -72,16 +69,18 @@ def build_spec() -> mujoco.MjSpec:
     world.add_geom(name="floor", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, 0.05], material="grid")
 
     # Object to pick: a 5 cm red cube with a free joint (6-DOF, falls under gravity).
-    cube = world.add_body(name="cube", pos=CUBE_START)
+    cube = world.add_body(name="cube", pos=[CUBE_START[0], CUBE_START[1], cube_half])
     cube.add_freejoint(name="cube_joint")
-    cube.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.025] * 3, rgba=[0.85, 0.15, 0.15, 1], mass=0.1)
+    cube.add_geom(name="cube_geom", type=mujoco.mjtGeom.mjGEOM_BOX, size=[cube_half] * 3,
+                  rgba=[0.85, 0.15, 0.15, 1], mass=cube_mass, friction=[cube_friction, 0.005, 0.0001])
 
     _add_open_box(world, "box", BOX_POS)
     return arm
 
 
-def build_model():
-    model = build_spec().compile()
+def build_model(**cube):
+    """Compile the scene. Pass cube_half / cube_mass / cube_friction to change the cube."""
+    model = build_spec(**cube).compile()
     data = mujoco.MjData(model)
     reset_home(model, data)
     return model, data
@@ -99,6 +98,26 @@ def reset_home(model, data):
     mujoco.mj_resetData(model, data)
     data.qpos[arm_qpos_ids(model)] = HOME_QPOS
     data.ctrl[:6] = HOME_QPOS  # the 6 arm actuators come first
+    mujoco.mj_forward(model, data)
+
+
+def yaw_quat(yaw):
+    """Quaternion (w, x, y, z) for a rotation of `yaw` rad about the world z-axis."""
+    return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+
+
+def cube_yaw(data):
+    """Cube rotation about world z (rad), read from its orientation matrix."""
+    R = data.body("cube").xmat.reshape(3, 3)
+    return np.arctan2(R[1, 0], R[0, 0])
+
+
+def place_cube(model, data, xy, yaw):
+    """Put the cube flat on the floor at `xy`, rotated by `yaw` rad, at rest."""
+    jnt = model.joint("cube_joint")
+    half = model.geom("cube_geom").size[0]
+    data.qpos[jnt.qposadr[0]:jnt.qposadr[0] + 7] = [xy[0], xy[1], half, *yaw_quat(yaw)]
+    data.qvel[jnt.dofadr[0]:jnt.dofadr[0] + 6] = 0
     mujoco.mj_forward(model, data)
 
 
