@@ -140,10 +140,7 @@ vision-language-action (VLA) policy.
 - [x] Scene, damped least-squares IK from scratch, pick-and-place
 - [x] Randomized evaluation and robustness fixes (this page)
 - [ ] Replace the joint PD with gravity compensation, then an operational-space / impedance
-      controller, and re-run this evaluation to compare
-- [ ] Camera-based cube pose estimation (target: under 10 mm / 10° error, from the sweep above)
-- [ ] Cloth in simulation; teleoperated demonstrations; imitation-learning policy (ACT / diffusion)
-- [ ] Real arm and Jetson; VLA fine-tuning (e.g. NVIDIA GR00T); voice commands
+      controller, and re-run this evaluation to compare (in progress)
 
 ## Acknowledgements
 
