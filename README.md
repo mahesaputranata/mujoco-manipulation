@@ -117,7 +117,7 @@ This is still an idealized setup, and the limits are stated here on purpose:
 ## Reproduce
 
 ```bash
-git clone <this repo> && cd mujoco-arm
+git clone https://github.com/mahesaputranata/mujoco-manipulation && cd mujoco-manipulation
 git clone https://github.com/google-deepmind/mujoco_menagerie third_party/menagerie
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
@@ -148,4 +148,5 @@ vision-language-action (VLA) policy.
 ## Acknowledgements
 
 The robot models come from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)
-(UR5e, Robotiq 2F-85), under their respective licenses.
+(UR5e, Robotiq 2F-85), under their respective licenses. They are not included in this repo.
+The code here is under the [MIT License](LICENSE).
