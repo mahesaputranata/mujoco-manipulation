@@ -195,10 +195,7 @@ vision-language-action (VLA) policy.
 - [x] Randomized evaluation and robustness fixes
 - [x] Gravity compensation and wait-to-arrive; controller comparison (this page)
 - [ ] Computed-torque control (removes the motion lag), then operational-space / impedance
-      control for contact-rich tasks
-- [ ] Camera-based cube pose estimation (target: under 10 mm / 10° error, from the sweep above)
-- [ ] Cloth in simulation; teleoperated demonstrations; imitation-learning policy (ACT / diffusion)
-- [ ] Real arm and Jetson; VLA fine-tuning (e.g. NVIDIA GR00T); voice commands
+      control for contact-rich tasks (in progress)
 
 ## Acknowledgements
 
