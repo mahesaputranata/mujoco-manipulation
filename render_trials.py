@@ -3,7 +3,7 @@
 Trials are rebuilt from the same flags and seed as the eval, so the GIF shows exactly
 what happened in that trial. Pass the same scenario flags you used for eval_place.py.
 
-    # trial 7 of the wide-workspace eval, original planner vs fixed one, side by side
+    # trial 7 of the wide-workspace eval, original vs improved system, side by side
     python render_trials.py --workspace wide --trial 7 --compare
 
     # the 3 most fragile poses from a --repeats run (renders a failing noise sample of each)
@@ -23,11 +23,11 @@ import mujoco
 import numpy as np
 from PIL import Image, ImageDraw
 
-from demo_reach import make_stepper, pick_and_place
-from eval_place import ROOT, add_scenario_args, sample_trial, setup_trial
+from demo_reach import Stepper, pick_and_place
+from eval_place import ROOT, add_scenario_args, controller_for, sample_trial, setup_trial
 
 FPS = 15
-COLORS = 128  # GIF palette size: fewer colours = much smaller files
+COLORS = 256  # GIF palette size: fewer colours = much smaller files
 OK_COLOR, FAIL_COLOR, TEXT_COLOR, BAR_COLOR = (12, 163, 12), (208, 59, 59), (230, 230, 230), (20, 20, 20)
 
 
@@ -40,26 +40,33 @@ def make_camera():
     return cam
 
 
+class FilmingStepper(Stepper):
+    """A Stepper that also renders a frame every `every` physics steps."""
+
+    def __init__(self, model, data, controller, renderer, every):
+        super().__init__(model, data, controller=controller)
+        self.renderer, self.every, self.cam = renderer, every, make_camera()
+        self.frames, self.count = [], 0
+
+    def snapshot(self):
+        self.renderer.update_scene(self.data, self.cam)
+        return self.renderer.render().copy()
+
+    def __call__(self, q_cmd, grip):
+        super().__call__(q_cmd, grip)
+        self.count += 1
+        if self.count % self.every == 0:
+            self.frames.append(self.snapshot())
+
+
 def render_trial(trial, args, width, height, speed):
     """Run one trial and return (frames, outcome, attempts). One frame per 1/FPS s of GIF time."""
     model, data, kwargs = setup_trial(trial, args)
     renderer = mujoco.Renderer(model, height, width)
-    cam = make_camera()
-    sim_step = make_stepper(model, data, controller=args.controller)
     every = max(1, round(speed / (FPS * model.opt.timestep)))  # physics steps per GIF frame
-    frames, count = [], [0]
-
-    def step(q_cmd, grip):
-        sim_step(q_cmd, grip)
-        count[0] += 1
-        if count[0] % every == 0:
-            renderer.update_scene(data, cam)
-            frames.append(renderer.render().copy())
-
+    step = FilmingStepper(model, data, controller_for(trial, args), renderer, every)
     outcome, attempts = pick_and_place(model, data, step, **kwargs)
-    if not frames:  # e.g. IK_FAIL before any motion: show the still scene for a second
-        renderer.update_scene(data, cam)
-        frames = [renderer.render().copy()] * FPS
+    frames = step.frames or [step.snapshot()] * FPS  # e.g. IK_FAIL before any motion: a still second
     renderer.close()
     return frames, outcome, attempts
 
@@ -75,7 +82,7 @@ def caption(frame, lines, outcome):
 
 
 def label(trial, args, outcome, attempts):
-    mode = "original planner" if args.baseline else "fixed planner"
+    mode = "original system" if args.baseline else "improved system"
     rep = f".{trial['repeat']}" if trial["repeat"] else ""
     return [f"{outcome}  ({mode}, {attempts} attempt{'s' * (attempts > 1)})",
             f"trial {trial['trial']}{rep}: x={trial['x']:.2f} y={trial['y']:.2f} yaw={trial['yaw_deg']:+.0f} deg"]
@@ -84,12 +91,15 @@ def label(trial, args, outcome, attempts):
 def save_gif(frames, path):
     frames = frames + [frames[-1]] * FPS  # hold the last frame for a second
     # One shared palette for all frames, no dithering: the checker floor dithers into noise otherwise.
-    # Caption colours are only a few pixels, so add solid patches of them to the palette sample.
-    mid = frames[len(frames) // 2]
-    sample = Image.new("RGB", (mid.width, mid.height + 60))
-    sample.paste(mid, (0, 0))
+    # Build the palette from several frames (one frame can miss colours, e.g. the box's brown),
+    # plus solid patches of the caption colours, which are only a few pixels each.
+    picks = [frames[int(k * (len(frames) - 1) / 3)] for k in range(4)]
+    w, h = picks[0].width, picks[0].height
+    sample = Image.new("RGB", (w, 4 * h + 60))
+    for k, f in enumerate(picks):
+        sample.paste(f, (0, k * h))
     for k, color in enumerate([OK_COLOR, FAIL_COLOR, TEXT_COLOR, BAR_COLOR]):
-        sample.paste(color, (k * mid.width // 4, mid.height, (k + 1) * mid.width // 4, mid.height + 60))
+        sample.paste(color, (k * w // 4, 4 * h, (k + 1) * w // 4, 4 * h + 60))
     palette = sample.quantize(COLORS, method=Image.Quantize.MEDIANCUT)
     frames = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
     frames[0].save(path, save_all=True, append_images=frames[1:], duration=1000 // FPS, loop=0, optimize=True)
@@ -152,7 +162,7 @@ def main():
     parser.add_argument("--outcome", help="... only those with this outcome, e.g. GRASP_MISS")
     parser.add_argument("--fragile", help="render the poses.csv poses closest to 50%% success")
     parser.add_argument("--limit", type=int, default=3)
-    parser.add_argument("--compare", action="store_true", help="original vs fixed planner side by side")
+    parser.add_argument("--compare", action="store_true", help="original vs improved system side by side")
     parser.add_argument("--speed", type=float, default=2.0, help="playback speed vs real time")
     parser.add_argument("--width", type=int, default=400)
     parser.add_argument("--height", type=int, default=300)

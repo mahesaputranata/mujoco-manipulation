@@ -86,14 +86,14 @@ def plot_outcomes(rows, path, title, workspace=None):
     plt.close(fig)
 
 
-PLANNERS = [(True, "original planner", "#eb6834"), (False, "fixed planner", "#2a78d6")]
+PLANNERS = [(True, "original system", "#eb6834"), (False, "improved system", "#2a78d6")]
 
 
 def plot_yaw_sweep(rows, path, title):
-    """Grasp offset and twist vs cube yaw, one line per planner. Failed runs get an X."""
+    """Grasp offset and twist vs cube yaw, one line per system. Failed runs get an X."""
     fig, axes = plt.subplots(2, 1, figsize=(9, 6.2), sharex=True)
     fig.patch.set_facecolor(SURFACE)
-    fig.suptitle(f"Yaw sweep: how cleanly does each planner grasp?   ({title})", color=INK, fontsize=12,
+    fig.suptitle(f"Yaw sweep: how cleanly does each system grasp?   ({title})", color=INK, fontsize=12,
                  x=0.01, ha="left")
     panels = [("grasp_offset_mm", "cube offset from fingertip centre\nafter closing (mm)"),
               ("grasp_twist_deg", "cube rotated by closing\nthe fingers (deg)")]

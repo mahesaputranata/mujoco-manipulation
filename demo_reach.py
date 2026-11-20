@@ -3,7 +3,7 @@
 Run with the 3D viewer:   python demo_reach.py
 Run without a window:     python demo_reach.py --headless   (prints a report)
 Try a hard start pose:    python demo_reach.py --x 0.5 --y 0.1 --yaw 45
-Old behaviour (baseline): python demo_reach.py --yaw 45 --no-align --retries 0 --ik-restarts 0
+Original system:          python demo_reach.py --yaw 45 --no-align --retries 0 --ik-restarts 0 --no-arrive --controller pd
 
 eval_place.py runs this many times with random cube poses and reports the success rate.
 """
@@ -293,7 +293,7 @@ def main():
     parser.add_argument("--no-align", action="store_true", help="baseline: ignore cube yaw when grasping")
     parser.add_argument("--retries", type=int, default=1, help="re-grasp attempts after a missed grasp")
     parser.add_argument("--ik-restarts", type=int, default=8, help="extra IK starting poses if IK gets stuck")
-    parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
+    parser.add_argument("--controller", choices=CONTROLLERS, default="pd_gravity", help="arm controller, see controllers.py")
     parser.add_argument("--no-arrive", action="store_true", help="close/open the gripper on schedule, don't wait")
     args = parser.parse_args()
 

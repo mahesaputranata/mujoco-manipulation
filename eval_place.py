@@ -9,11 +9,11 @@ which gives each pose its own success rate. Poses in between 0% and 100% are the
 fragile ones: whether they succeed depends on luck in the perception error.
 
     python eval_place.py                                  # 100 trials, all fixes on
-    python eval_place.py --baseline                       # original: no yaw align, re-grasp or IK restarts
+    python eval_place.py --baseline                       # original system: planner without the fixes, plain PD
     python eval_place.py --pos-noise 5 --yaw-noise 5      # imperfect "camera" (mm, deg)
     python eval_place.py --rand-physics --workspace wide  # harder: random cube size/mass/friction, wider area
     python eval_place.py --pos-noise 15 --yaw-noise 15 --repeats 10   # per-pose success rate
-    python eval_place.py --controller pd_gravity          # same trials, gravity-compensated controller
+    python eval_place.py --controller pd                  # improved planner, but plain PD control
     python eval_place.py --yaw-sweep                      # cube at one spot, yaw 0..90 deg, both planners
     python eval_place.py --replay 17                      # watch trial 17 (use the same flags as the eval)
     python render_trials.py ...                           # the same trials as GIFs (see that file)
@@ -90,6 +90,13 @@ def setup_trial(trial, args):
                              arrive=not (baseline or args.no_arrive))
 
 
+def controller_for(trial, args):
+    """The original system uses plain PD. The improved one uses --controller (default: pd_gravity)."""
+    if trial.get("baseline", args.baseline):
+        return "pd"
+    return args.controller or "pd_gravity"
+
+
 _worker = {}
 
 
@@ -101,7 +108,7 @@ def run_trial(trial):
     model, data, kwargs = setup_trial(trial, _worker["args"])
     t0 = time.perf_counter()
     metrics = {}
-    step = make_stepper(model, data, controller=_worker["args"].controller)
+    step = make_stepper(model, data, controller=controller_for(trial, _worker["args"]))
     outcome, attempts = pick_and_place(model, data, step, metrics=metrics, **kwargs)
     return {**trial, "outcome": outcome, "attempts": attempts, **metrics, "seconds": time.perf_counter() - t0,
             "final_x": data.body("cube").xpos[0], "final_y": data.body("cube").xpos[1],
@@ -110,7 +117,7 @@ def run_trial(trial):
 
 def default_tag(args):
     parts = ["baseline" if args.baseline else "fixed", args.workspace]
-    if args.controller != "pd":
+    if not args.baseline and args.controller not in (None, "pd_gravity"):
         parts.append(args.controller)
     if args.no_arrive and not args.baseline:
         parts.append("noarrive")
@@ -212,7 +219,8 @@ def add_scenario_args(parser):
     parser.add_argument("--pos-noise", type=float, default=0.0, help="perception noise, std dev in mm")
     parser.add_argument("--yaw-noise", type=float, default=0.0, help="perception noise, std dev in deg")
     parser.add_argument("--rand-physics", action="store_true", help="random cube size, mass and friction")
-    parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
+    parser.add_argument("--controller", choices=CONTROLLERS,
+                        help="arm controller for the improved planner (default pd_gravity; --baseline always uses pd)")
     parser.add_argument("--no-arrive", action="store_true",
                         help="close/open the gripper on schedule instead of waiting for the arm to arrive")
 
@@ -235,7 +243,7 @@ def main():
         trial = sample_trial(args.replay, args, args.repeat)
         print({k: round(v, 3) if isinstance(v, float) else v for k, v in trial.items()})
         model, data, kwargs = setup_trial(trial, args)
-        run_in_viewer(model, data, args.controller, **kwargs, log=print)
+        run_in_viewer(model, data, controller_for(trial, args), **kwargs, log=print)
         return
 
     if args.repeats > 1 and not (args.pos_noise or args.yaw_noise):
@@ -256,7 +264,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     write_csv(rows, out / "trials.csv")
     if args.yaw_sweep:
-        for baseline, name in ((True, "original planner"), (False, "fixed planner")):
+        for baseline, name in ((True, "original system"), (False, "improved system")):
             print_summary([r for r in rows if r["baseline"] == baseline], f"{tag} / {name}", wall)
         from plot_results import plot_yaw_sweep
         plot_yaw_sweep(rows, out / "yaw_sweep.png", tag)
