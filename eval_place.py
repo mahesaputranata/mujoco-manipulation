@@ -13,6 +13,7 @@ fragile ones: whether they succeed depends on luck in the perception error.
     python eval_place.py --pos-noise 5 --yaw-noise 5      # imperfect "camera" (mm, deg)
     python eval_place.py --rand-physics --workspace wide  # harder: random cube size/mass/friction, wider area
     python eval_place.py --pos-noise 15 --yaw-noise 15 --repeats 10   # per-pose success rate
+    python eval_place.py --controller pd_gravity          # same trials, gravity-compensated controller
     python eval_place.py --yaw-sweep                      # cube at one spot, yaw 0..90 deg, both planners
     python eval_place.py --replay 17                      # watch trial 17 (use the same flags as the eval)
     python render_trials.py ...                           # the same trials as GIFs (see that file)
@@ -31,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
+from controllers import CONTROLLERS
 from demo_reach import METRICS, OUTCOMES, ground_truth, make_stepper, pick_and_place, run_in_viewer
 from scene import BOX_POS, CUBE_HALF, CUBE_MASS, build_model, cube_yaw, place_cube
 
@@ -98,7 +100,8 @@ def run_trial(trial):
     model, data, kwargs = setup_trial(trial, _worker["args"])
     t0 = time.perf_counter()
     metrics = {}
-    outcome, attempts = pick_and_place(model, data, make_stepper(model, data), metrics=metrics, **kwargs)
+    step = make_stepper(model, data, controller=_worker["args"].controller)
+    outcome, attempts = pick_and_place(model, data, step, metrics=metrics, **kwargs)
     return {**trial, "outcome": outcome, "attempts": attempts, **metrics, "seconds": time.perf_counter() - t0,
             "final_x": data.body("cube").xpos[0], "final_y": data.body("cube").xpos[1],
             "final_yaw_deg": np.degrees(cube_yaw(data))}
@@ -106,6 +109,8 @@ def run_trial(trial):
 
 def default_tag(args):
     parts = ["baseline" if args.baseline else "fixed", args.workspace]
+    if args.controller != "pd":
+        parts.append(args.controller)
     if args.pos_noise or args.yaw_noise:
         parts.append(f"noise{args.pos_noise:g}mm{args.yaw_noise:g}deg")
     if args.rand_physics:
@@ -204,6 +209,7 @@ def add_scenario_args(parser):
     parser.add_argument("--pos-noise", type=float, default=0.0, help="perception noise, std dev in mm")
     parser.add_argument("--yaw-noise", type=float, default=0.0, help="perception noise, std dev in deg")
     parser.add_argument("--rand-physics", action="store_true", help="random cube size, mass and friction")
+    parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
 
 
 def main():
@@ -224,7 +230,7 @@ def main():
         trial = sample_trial(args.replay, args, args.repeat)
         print({k: round(v, 3) if isinstance(v, float) else v for k, v in trial.items()})
         model, data, kwargs = setup_trial(trial, args)
-        run_in_viewer(model, data, **kwargs, log=print)
+        run_in_viewer(model, data, args.controller, **kwargs, log=print)
         return
 
     if args.repeats > 1 and not (args.pos_noise or args.yaw_noise):

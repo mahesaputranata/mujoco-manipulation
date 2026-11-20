@@ -45,7 +45,7 @@ def render_trial(trial, args, width, height, speed):
     model, data, kwargs = setup_trial(trial, args)
     renderer = mujoco.Renderer(model, height, width)
     cam = make_camera()
-    sim_step = make_stepper(model, data)
+    sim_step = make_stepper(model, data, controller=args.controller)
     every = max(1, round(speed / (FPS * model.opt.timestep)))  # physics steps per GIF frame
     frames, count = [], [0]
 

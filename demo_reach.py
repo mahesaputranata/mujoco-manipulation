@@ -14,6 +14,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+from controllers import CONTROLLERS
 from ik import DOWN, solve_ik, solve_ik_multistart
 from scene import (CUBE_START, GRIPPER_ACTUATOR, TCP_SITE, arm_qpos_ids, build_model, cube_yaw,
                    place_cube, yaw_quat)
@@ -97,7 +98,7 @@ def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=No
 
 def run_plan(model, data, plan, step):
     """Send a smoothly blended control target every physics step; yield each segment's name when it ends."""
-    q_from = data.ctrl[:6].copy()
+    q_from = step.q_cmd.copy()  # the last joint target (data.ctrl may include a feedforward offset)
     for name, q_to, grip, dur in plan:
         steps = int(dur / model.opt.timestep)
         for k in range(steps):
@@ -123,7 +124,16 @@ def ground_truth(data):
     return data.body("cube").xpos.copy(), cube_yaw(data)
 
 
-METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm"]
+METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "reach_error_mm", "track_error_mm",
+           "hold_error_mm"]
+
+
+def tcp_error(model, data, q_target, scratch):
+    """Distance (m) between where the TCP is and where it would be at the joint target q_target."""
+    scratch.qpos[:] = data.qpos
+    scratch.qpos[arm_qpos_ids(model)] = q_target
+    mujoco.mj_kinematics(model, scratch)
+    return np.linalg.norm(scratch.site(TCP_SITE).xpos - data.site(TCP_SITE).xpos)
 
 
 def wrap_cube_angle(a):
@@ -143,19 +153,29 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
       grasp_offset_mm   horizontal distance cube centre <-> fingertip centre right after closing
       grasp_twist_deg   how far closing the fingers rotated the cube (0 = fingers met it square)
       place_error_mm    final horizontal distance of the cube from the box centre (OK runs)
+    And how well the controller follows the planned joint targets (TCP distance, actual vs target):
+      reach_error_mm    at the end of "down to cube", i.e. where the grasp really happens
+      track_error_mm    mean over all segment ends (the arm is still catching up after big moves)
+      hold_error_mm     after the final settle, holding still (static sag)
     """
     say = log or (lambda msg: None)
     m = metrics if metrics is not None else {}
     m.update({k: np.nan for k in METRICS})
     z0 = data.body("cube").xpos[2]
+    scratch = mujoco.MjData(model)
+    seg_errors = []
     for attempt in range(1, retries + 2):
         cube_pos, yaw = perceive(data)
         plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
         if not ik_ok:
             return "IK_FAIL", attempt
+        targets = {seg[0]: seg[1] for seg in plan}
         for name in run_plan(model, data, plan, step):
+            seg_errors.append(1000 * tcp_error(model, data, targets[name], scratch))
+            m["track_error_mm"] = np.mean(seg_errors)
             if name == "down to cube":
                 yaw_before_close = cube_yaw(data)
+                m["reach_error_mm"] = seg_errors[-1]
             if name == "close gripper":
                 m["grasp_offset_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.site(TCP_SITE).xpos)[:2])
                 m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))
@@ -167,6 +187,7 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
         else:
             for _ in range(SETTLE_STEPS):
                 step(plan[-1][1], OPEN)
+            m["hold_error_mm"] = 1000 * tcp_error(model, data, plan[-1][1], scratch)
             if not cube_in_box(data):
                 return "MISSED_BOX", attempt
             m["place_error_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.body("box").xpos)[:2])
@@ -180,31 +201,48 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
     return "GRASP_MISS", attempt
 
 
-def make_stepper(model, data, viewer=None):
-    """Return step(q_cmd, grip). With a viewer, it also draws and runs in real time."""
-    gripper = model.actuator(GRIPPER_ACTUATOR).id
+class Stepper:
+    """step(q_cmd, grip): one physics step towards arm joint target q_cmd.
 
-    def step(q_cmd, grip):
+    `controller` (see controllers.py) turns q_cmd into the arm actuator commands.
+    `q_cmd` holds the last joint target. With a viewer, it also draws and runs in real time.
+
+    A class rather than a closure that stores attributes on itself: that closure refers to
+    itself, a reference cycle that Python frees only occasionally. Every trial's MuJoCo
+    model and data then stayed in memory (about 2 GB per worker after a few hundred trials).
+    """
+
+    def __init__(self, model, data, viewer=None, controller="pd"):
+        self.model, self.data, self.viewer = model, data, viewer
+        self.gripper = model.actuator(GRIPPER_ACTUATOR).id
+        self.ctl = CONTROLLERS[controller](model)
+        self.q_cmd = data.ctrl[:6].copy()  # reset_home sets ctrl to the home joint angles
+
+    def __call__(self, q_cmd, grip):
+        model, data = self.model, self.data
         t0 = time.time()
-        data.ctrl[:6] = q_cmd
-        data.ctrl[gripper] = grip
+        self.q_cmd = np.asarray(q_cmd, dtype=float).copy()
+        data.ctrl[:6] = self.ctl(model, data, self.q_cmd)
+        data.ctrl[self.gripper] = grip
         mujoco.mj_step(model, data)
-        if viewer is not None:
-            if not viewer.is_running():
+        if self.viewer is not None:
+            if not self.viewer.is_running():
                 raise SystemExit
-            viewer.sync()
+            self.viewer.sync()
             time.sleep(max(0, model.opt.timestep - (time.time() - t0)))  # real-time pace
-    return step
 
 
-def run_in_viewer(model, data, **kwargs):
+make_stepper = Stepper
+
+
+def run_in_viewer(model, data, controller="pd", **kwargs):
     """Run pick_and_place in the 3D viewer, then hold the final pose until the window closes."""
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        step = make_stepper(model, data, viewer)
+        step = make_stepper(model, data, viewer, controller)
         result = pick_and_place(model, data, step, **kwargs)
         print(f"Outcome: {result[0]} after {result[1]} attempt(s). Close the window to exit.")
         while viewer.is_running():
-            step(data.ctrl[:6].copy(), data.ctrl[-1])
+            step(step.q_cmd, data.ctrl[-1])
     return result
 
 
@@ -217,17 +255,21 @@ def main():
     parser.add_argument("--no-align", action="store_true", help="baseline: ignore cube yaw when grasping")
     parser.add_argument("--retries", type=int, default=1, help="re-grasp attempts after a missed grasp")
     parser.add_argument("--ik-restarts", type=int, default=8, help="extra IK starting poses if IK gets stuck")
+    parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
     args = parser.parse_args()
 
     model, data = build_model()
     place_cube(model, data, (args.x, args.y), np.radians(args.yaw))
     kwargs = dict(align=not args.no_align, retries=args.retries, ik_restarts=args.ik_restarts, log=print)
     if args.headless:
-        outcome, attempts = pick_and_place(model, data, make_stepper(model, data), **kwargs)
+        metrics = {}
+        outcome, attempts = pick_and_place(model, data, make_stepper(model, data, controller=args.controller),
+                                           metrics=metrics, **kwargs)
         print(f"TCP final: {data.site(TCP_SITE).xpos.round(3)}  cube final: {data.body('cube').xpos.round(3)}")
         print(f"Outcome: {outcome} after {attempts} attempt(s)")
+        print("  ".join(f"{k} {v:.1f}" for k, v in metrics.items()))
     else:
-        run_in_viewer(model, data, **kwargs)
+        run_in_viewer(model, data, args.controller, **kwargs)
 
 
 if __name__ == "__main__":
