@@ -86,7 +86,8 @@ def setup_trial(trial, args):
     baseline = trial.get("baseline", args.baseline)  # the yaw sweep runs both planners in one go
     return model, data, dict(perceive=noisy_perception(args, rng), align=not baseline,
                              retries=0 if baseline else args.retries,
-                             ik_restarts=0 if baseline else args.ik_restarts)
+                             ik_restarts=0 if baseline else args.ik_restarts,
+                             arrive=not (baseline or args.no_arrive))
 
 
 _worker = {}
@@ -111,6 +112,8 @@ def default_tag(args):
     parts = ["baseline" if args.baseline else "fixed", args.workspace]
     if args.controller != "pd":
         parts.append(args.controller)
+    if args.no_arrive and not args.baseline:
+        parts.append("noarrive")
     if args.pos_noise or args.yaw_noise:
         parts.append(f"noise{args.pos_noise:g}mm{args.yaw_noise:g}deg")
     if args.rand_physics:
@@ -210,6 +213,8 @@ def add_scenario_args(parser):
     parser.add_argument("--yaw-noise", type=float, default=0.0, help="perception noise, std dev in deg")
     parser.add_argument("--rand-physics", action="store_true", help="random cube size, mass and friction")
     parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
+    parser.add_argument("--no-arrive", action="store_true",
+                        help="close/open the gripper on schedule instead of waiting for the arm to arrive")
 
 
 def main():

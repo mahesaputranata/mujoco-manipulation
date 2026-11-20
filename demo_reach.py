@@ -25,6 +25,11 @@ IK_ROT_TOL = np.radians(1.0)
 LIFT_MIN = 0.10              # m: after "lift" the cube must have risen at least this much
 HOLD_MAX = 0.04              # m: cube centre farther than this from the TCP = no longer in the hand
 SETTLE_STEPS = 500
+# Before closing or opening the gripper, wait until the arm has actually arrived (see wait_until_arrived).
+ARRIVE_BEFORE = ("down to cube", "lower into box")
+ARRIVE_TOL = 0.002           # m: TCP this close to its target counts as arrived
+STILL_SPEED = 0.005          # m/s: TCP slower than this has stopped; waiting longer won't help
+ARRIVE_TIMEOUT = 1.5         # s
 
 OUTCOMES = ["OK", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
 
@@ -96,8 +101,12 @@ def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=No
     return plan, ok, quat
 
 
-def run_plan(model, data, plan, step):
-    """Send a smoothly blended control target every physics step; yield each segment's name when it ends."""
+def run_plan(model, data, plan, step, arrive=None):
+    """Send a smoothly blended control target every physics step; yield each segment's name when it ends.
+
+    If given, `arrive(q_target, grip)` runs after the segments in ARRIVE_BEFORE, before the
+    name is yielded: the trajectory timing says the arm should be there, `arrive` checks it is.
+    """
     q_from = step.q_cmd.copy()  # the last joint target (data.ctrl may include a feedforward offset)
     for name, q_to, grip, dur in plan:
         steps = int(dur / model.opt.timestep)
@@ -105,6 +114,8 @@ def run_plan(model, data, plan, step):
             s = (k + 1) / steps
             s = 3 * s**2 - 2 * s**3  # smoothstep: zero velocity at start and end
             step(q_from + s * (q_to - q_from), grip)
+        if arrive is not None and name in ARRIVE_BEFORE:
+            arrive(q_to, grip)
         q_from = q_to
         yield name
 
@@ -125,7 +136,7 @@ def ground_truth(data):
 
 
 METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "reach_error_mm", "track_error_mm",
-           "hold_error_mm"]
+           "hold_error_mm", "wait_s"]
 
 
 def tcp_error(model, data, q_target, scratch):
@@ -141,8 +152,30 @@ def wrap_cube_angle(a):
     return (a + np.pi / 4) % (np.pi / 2) - np.pi / 4
 
 
+def wait_until_arrived(model, data, step, q_target, grip, scratch):
+    """Keep commanding q_target until the TCP is within ARRIVE_TOL of it. Returns seconds waited.
+
+    The planner's timing assumes the arm keeps up with the trajectory. It doesn't: a PD
+    controller lags behind during motion. Closing the gripper on schedule can then pinch
+    the cube too high. Stops early if the arm has stopped moving (a controller with a
+    static error, like plain PD sagging under gravity, never gets closer) or at the timeout.
+    """
+    dt, chunk = model.opt.timestep, 10
+    prev = data.site(TCP_SITE).xpos.copy()
+    n = 0
+    while n * dt < ARRIVE_TIMEOUT and tcp_error(model, data, q_target, scratch) > ARRIVE_TOL:
+        for _ in range(chunk):
+            step(q_target, grip)
+        n += chunk
+        pos = data.site(TCP_SITE).xpos.copy()
+        if np.linalg.norm(pos - prev) / (chunk * dt) < STILL_SPEED:
+            break
+        prev = pos
+    return n * dt
+
+
 def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
-                   metrics=None):
+                   metrics=None, arrive=True):
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
@@ -157,6 +190,7 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
       reach_error_mm    at the end of "down to cube", i.e. where the grasp really happens
       track_error_mm    mean over all segment ends (the arm is still catching up after big moves)
       hold_error_mm     after the final settle, holding still (static sag)
+      wait_s            total time spent waiting for the arm to arrive (with `arrive`)
     """
     say = log or (lambda msg: None)
     m = metrics if metrics is not None else {}
@@ -164,13 +198,17 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
     z0 = data.body("cube").xpos[2]
     scratch = mujoco.MjData(model)
     seg_errors = []
+    m["wait_s"] = 0.0
+
+    def wait(q_target, grip):
+        m["wait_s"] += wait_until_arrived(model, data, step, q_target, grip, scratch)
     for attempt in range(1, retries + 2):
         cube_pos, yaw = perceive(data)
         plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
         if not ik_ok:
             return "IK_FAIL", attempt
         targets = {seg[0]: seg[1] for seg in plan}
-        for name in run_plan(model, data, plan, step):
+        for name in run_plan(model, data, plan, step, wait if arrive else None):
             seg_errors.append(1000 * tcp_error(model, data, targets[name], scratch))
             m["track_error_mm"] = np.mean(seg_errors)
             if name == "down to cube":
@@ -256,11 +294,13 @@ def main():
     parser.add_argument("--retries", type=int, default=1, help="re-grasp attempts after a missed grasp")
     parser.add_argument("--ik-restarts", type=int, default=8, help="extra IK starting poses if IK gets stuck")
     parser.add_argument("--controller", choices=CONTROLLERS, default="pd", help="arm controller, see controllers.py")
+    parser.add_argument("--no-arrive", action="store_true", help="close/open the gripper on schedule, don't wait")
     args = parser.parse_args()
 
     model, data = build_model()
     place_cube(model, data, (args.x, args.y), np.radians(args.yaw))
-    kwargs = dict(align=not args.no_align, retries=args.retries, ik_restarts=args.ik_restarts, log=print)
+    kwargs = dict(align=not args.no_align, retries=args.retries, ik_restarts=args.ik_restarts, log=print,
+                  arrive=not args.no_arrive)
     if args.headless:
         metrics = {}
         outcome, attempts = pick_and_place(model, data, make_stepper(model, data, controller=args.controller),
