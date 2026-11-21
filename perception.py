@@ -181,7 +181,9 @@ def estimate_from_image(rgb, camera, iterations=6):
         (cx, cy), (w, h), angle = cv2.minAreaRect(pts.astype(np.float32) * 1000)  # in mm for precision
         half = 0.25 * (w + h) / 1000  # a cube: height = width
     yaw = np.radians(angle)
-    return dict(pos=np.array([cx / 1000, cy / 1000, half]), yaw=yaw, half=half, pixels=int(blob.sum()))
+    aspect = min(w, h) / max(w, h)  # 1 for a fully visible top face; a partly hidden one is not square
+    return dict(pos=np.array([cx / 1000, cy / 1000, half]), yaw=yaw, half=half, aspect=aspect,
+                pixels=int(blob.sum()))
 
 
 def plausible(est):

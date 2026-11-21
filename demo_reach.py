@@ -16,7 +16,7 @@ import numpy as np
 
 from controllers import CONTROLLERS
 from ik import DOWN, solve_ik, solve_ik_multistart
-from scene import (CUBE_START, GRIPPER_ACTUATOR, TCP_SITE, arm_qpos_ids, build_model, cube_yaw,
+from scene import (CAMERA_EYE, CUBE_START, GRIPPER_ACTUATOR, TCP_SITE, arm_qpos_ids, build_model, cube_yaw,
                    place_cube, yaw_quat)
 
 OPEN, CLOSED = 0.0, 255.0
@@ -30,6 +30,13 @@ ARRIVE_BEFORE = ("down to cube", "lower into box")
 ARRIVE_TOL = 0.002           # m: TCP this close to its target counts as arrived
 STILL_SPEED = 0.005          # m/s: TCP slower than this has stopped; waiting longer won't help
 ARRIVE_TIMEOUT = 1.5         # s
+# Tracking (Option B): during the descent the camera keeps watching and the aim follows the cube.
+TRACK_HZ = 20                # camera frames per second while tracking
+DESCENT_SPEED = 0.10         # m/s, the same pace as the planned 15 cm descent in 1.5 s
+CENTRE_TOL = 0.004           # m: close only once the fingertips are this close above the cube's centre
+TRACK_TIMEOUT = 1.0          # s at grasp height without centring: close anyway
+CLOSE_TIME = 1.0             # s of closing (as in the plan), still following the cube
+MAX_SPEED = 0.5              # m/s: a frame whose estimate jumped faster than this is rejected
 
 OUTCOMES = ["OK", "NOT_SEEN", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
 
@@ -41,7 +48,12 @@ def grasp_quat(psi):
     return q
 
 
-def grasp_angles(cube_yaw, align=True):
+def finger_axis(psi):
+    """Horizontal direction the fingers close along, for gripper turn psi (measured: 90 deg + psi)."""
+    return np.array([-np.sin(psi), np.cos(psi)])
+
+
+def grasp_angles(cube_yaw, align=True, view=None):
     """Candidate gripper turns (rad) that put the fingers square to the cube's faces, best first.
 
     A cube looks the same every 90 deg, so there are two distinct grasps: on one pair of
@@ -49,14 +61,29 @@ def grasp_angles(cube_yaw, align=True):
     wrist turn is tried first; the other is the fallback when the fingers would hit
     something, e.g. the box wall right next to the cube.
     Without `align` the gripper always comes straight down and closes on whatever is there.
+
+    With `view` (the camera's horizontal viewing direction towards the cube) the grasp whose fingers
+    close *across* the line of sight comes first: the gap between the fingers then stays open towards
+    the camera, so it can watch the cube's top face for longer while tracking.
     """
     if not align:
         return [0.0]
     psi = (cube_yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
-    return [psi, psi - np.sign(psi or 1) * np.pi / 2]
+    angles = [psi, psi - np.sign(psi or 1) * np.pi / 2]
+    if view is not None:
+        angles.sort(key=lambda a: abs(finger_axis(a) @ view))
+    return angles
 
 
-def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=None):
+def quat_turn(quat):
+    """The gripper turn psi of an orientation made by grasp_quat(psi)."""
+    q_down_inv, rel = np.empty(4), np.empty(4)
+    mujoco.mju_negQuat(q_down_inv, DOWN)
+    mujoco.mju_mulQuat(rel, quat, q_down_inv)  # yaw_quat(psi) = quat * DOWN^-1
+    return 2 * np.arctan2(rel[3], rel[0])
+
+
+def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=None, view=None, angles=None):
     """Plan the pick and place. Returns (segments, ok, gripper quat).
 
     Each segment is (name, arm joint targets, gripper command, seconds). Grasp angles are
@@ -81,7 +108,7 @@ def make_plan(model, data, cube_pos, cube_yaw, align=True, ik_restarts=8, log=No
         ("retreat",        above_box,               OPEN,   1.5, False),  # straight up, so the fingers don't drag the cube
     ]
     check = ik_restarts > 0  # the baseline (no restarts) also skips collision checks, like the original
-    for psi in grasp_angles(cube_yaw, align):
+    for psi in angles if angles is not None else grasp_angles(cube_yaw, align, view):
         quat = grasp_quat(psi)
         plan, ok, q_prev = [], True, data.qpos[arm_qpos_ids(model)].copy()
         if log:
@@ -136,8 +163,8 @@ def ground_truth(data):
 
 
 METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "target_shift_mm", "look_age_s",
-           "relook_seen", "relook_shift_mm", "reach_error_mm", "track_error_mm",
-           "hold_error_mm", "wait_s"]
+           "relook_seen", "relook_shift_mm", "track_lag_mm", "frames_lost", "reach_error_mm", "track_error_mm",
+           "hold_error_mm", "wait_s", "descent_s"]
 
 
 def tcp_error(model, data, q_target, scratch):
@@ -175,8 +202,73 @@ def wait_until_arrived(model, data, step, q_target, grip, scratch):
     return n * dt
 
 
+def wrap_grasp_angle(a):
+    """Wrap to [-90, 90) deg: a parallel gripper turned 180 deg grips the same way."""
+    return (a + np.pi / 2) % np.pi - np.pi / 2
+
+
+def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK_HZ, say=None, psi=None):
+    """Descend onto the cube while watching it (visual servoing), close the gripper, keep following.
+
+    Every camera frame: estimate the cube's pose, aim the fingertips at its centre at a height that
+    shrinks by DESCENT_SPEED, solve IK from the current target, and spread the move over the frame.
+    A frame that shows the cube jumping faster than MAX_SPEED, or no cube at all (the fingers can
+    block the view close to the grasp), is rejected: the aim stays on the last good estimate.
+    Returns the gripper turn used, so the rest of the plan can continue at the same wrist angle.
+    """
+    say = say or (lambda msg: None)
+    look = getattr(perceive, "quick", perceive)  # one image per frame, no double check
+    steps_per_frame = max(1, round(1 / (hz * model.opt.timestep)))
+    est_pos, est_yaw = np.array(cube_pos, float), yaw
+    psi = grasp_angles(est_yaw, align)[0] if psi is None else psi  # the plan's wrist angle
+    z_grasp, z = est_pos[2], est_pos[2] + 0.15
+    q_next = step.q_cmd.copy()
+    last_seen, lost, start, closing_since, at_height_since = data.time, 0, data.time, None, None
+    lag = []
+    while True:
+        seen = look(data)
+        dt = data.time - last_seen
+        if seen is not None and np.linalg.norm(seen[0][:2] - est_pos[:2]) <= MAX_SPEED * dt + 0.01:
+            est_pos, est_yaw, last_seen = np.array(seen[0], float), seen[1], data.time
+        else:
+            lost += 1
+        # Of the two grasps (the cube's two pairs of faces), keep the one closest to the current wrist.
+        psi = min(grasp_angles(est_yaw, align), key=lambda a: abs(wrap_grasp_angle(a - psi)))
+        if closing_since is None:
+            z = max(z_grasp, z - DESCENT_SPEED / hz)
+        target = np.array([est_pos[0], est_pos[1], z])
+        q_prev = q_next
+        q_next, *_ = solve_ik(model, data, TCP_SITE, target, grasp_quat(psi), q_init=q_prev, max_iters=30)
+
+        tcp, cube = data.site(TCP_SITE).xpos, data.body("cube").xpos
+        if z <= z_grasp:
+            lag.append(np.linalg.norm(tcp[:2] - cube[:2]))
+            at_height_since = at_height_since if at_height_since is not None else data.time
+        centred = np.linalg.norm(tcp[:2] - est_pos[:2]) < CENTRE_TOL and abs(tcp[2] - z_grasp) < 0.005
+        timed_out = at_height_since is not None and data.time - at_height_since > TRACK_TIMEOUT
+        if closing_since is None and z <= z_grasp and (centred or timed_out):
+            closing_since = data.time
+            m["target_shift_mm"] = 1000 * np.linalg.norm(cube[:2] - est_pos[:2])
+            m["look_age_s"] = data.time - last_seen
+            m["reach_error_mm"] = 1000 * np.linalg.norm(tcp - target)
+            yaw_before_close = cube_yaw(data)
+            if timed_out:
+                say("tracking: not centred in time, closing anyway")
+        grip = CLOSED if closing_since is not None else OPEN
+        for k in range(steps_per_frame):
+            step(q_prev + (k + 1) / steps_per_frame * (q_next - q_prev), grip)
+        if closing_since is not None and data.time - closing_since >= CLOSE_TIME:
+            break
+    m["grasp_offset_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.site(TCP_SITE).xpos)[:2])
+    m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))
+    m["track_lag_mm"] = 1000 * np.mean(lag[-max(1, len(lag) // 2):])  # gripper vs cube, at grasp height
+    m["frames_lost"] = lost
+    m["descent_s"] = closing_since - start
+    return psi
+
+
 def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
-                   metrics=None, arrive=True, look_again=False):
+                   metrics=None, arrive=True, look_again=False, track=False):
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
@@ -199,6 +291,10 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
     re-plans the descent from it, so the look is younger when the gripper closes:
       relook_seen       1 if the second look saw the cube (the arm above it can block the view)
       relook_shift_mm   how far the cube moved between the first and the second look
+    With `track`, the descent and the grasp follow the cube frame by frame (track_descent):
+      track_lag_mm      gripper vs cube, horizontally, while tracking at grasp height (arm lag)
+      frames_lost       camera frames rejected or without the cube during the descent
+      descent_s         from above the cube until the gripper starts closing
     """
     say = log or (lambda msg: None)
     m = metrics if metrics is not None else {}
@@ -217,7 +313,11 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
             say(f"attempt {attempt}: cube not seen")
             return "NOT_SEEN", attempt
         cube_pos, yaw = seen
-        plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
+        view = None
+        if track:  # prefer the grasp that keeps the cube visible to the fixed camera while tracking
+            view = cube_pos[:2] - np.asarray(CAMERA_EYE[:2])
+            view /= np.linalg.norm(view)
+        plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log, view=view)
         if not ik_ok:
             return "IK_FAIL", attempt
         # The plan can change mid-motion (look_again), so the loop reads it from `now`.
@@ -225,6 +325,18 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
                    targets={seg[0]: seg[1] for seg in plan})
 
         def segments():
+            if track:
+                yield from run_plan(model, data, now["plan"][:1], step)  # to above the cube
+                psi0 = quat_turn(now["quat"])
+                psi = track_descent(model, data, step, perceive, now["cube_pos"], yaw, align, m, say=say, psi=psi0)
+                # The cube is in the fingers now (or missed): plan lift, carry and place from here.
+                here = data.site(TCP_SITE).xpos.copy()
+                new_plan, ok, new_quat = make_plan(model, data, here, psi, align, ik_restarts, log, angles=[psi])
+                if ok:
+                    now.update(plan=new_plan, cube_pos=here, quat=new_quat,
+                               targets={seg[0]: seg[1] for seg in new_plan})
+                yield from run_plan(model, data, now["plan"][3:], step, wait if arrive else None)  # lift on
+                return
             if not look_again:
                 yield from run_plan(model, data, now["plan"], step, wait if arrive else None)
                 return

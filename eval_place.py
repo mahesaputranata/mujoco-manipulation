@@ -146,6 +146,28 @@ class Perceiver:
                                   calib_rot_err_deg=np.degrees(np.arccos(cos)), tags_seen=self.camera.tags)
         return pos, yaw
 
+    def quick(self, data):
+        """One look, no double check: for tracking, many frames per second (demo_reach.track_descent).
+
+        Close to the grasp the gripper's fingers hide part of the cube's top face. A partly hidden
+        face still looks red and cube-like, but its centre is off (by 34 mm in one logged descent),
+        so the tracker would steer to the wrong spot. It also looks smaller and no longer square:
+        frames whose size differs from the last full look by more than 1.5 mm, or whose top face
+        is not square, are rejected.
+        """
+        if self.camera is None:
+            return self(data)
+        from perception import plausible
+        est = self.camera.look(data)
+        if not plausible(est) or est["aspect"] < 0.9:
+            return None
+        reference = self.camera.last
+        if reference is not None and abs(est["half"] - reference["half"]) > 0.0015:
+            return None
+        pos = est["pos"].copy()
+        pos[:2] += self.rng.normal(0, self.args.pos_noise / 1000, 2)
+        return pos, est["yaw"] + self.rng.normal(0, np.radians(self.args.yaw_noise))
+
     def metrics(self):
         m = {k: np.nan for k in PERCEPTION_METRICS}
         m.update(self.first or {})
@@ -181,7 +203,8 @@ def setup_trial(trial, args):
                              retries=0 if baseline else args.retries,
                              ik_restarts=0 if baseline else args.ik_restarts,
                              arrive=not (baseline or args.no_arrive),
-                             look_again=args.look_again and not baseline)
+                             look_again=args.look_again and not baseline,
+                             track=args.track and not baseline)
 
 
 def controller_for(trial, args):
@@ -257,6 +280,8 @@ def default_tag(args):
         parts.append(f"{args.motion}{args.speed:g}cms")
     if args.look_again:
         parts.append("lookagain")
+    if args.track:
+        parts.append("track")
     if args.perception == "camera":
         parts.append("camera")
         if args.calibration != "ideal":
@@ -390,6 +415,8 @@ def add_scenario_args(parser):
     parser.add_argument("--focal-err", type=float, default=0.0, help="believed focal length off by this many %%")
     parser.add_argument("--look-again", action="store_true",
                         help="take a second look once the gripper is above the cube and re-plan the descent")
+    parser.add_argument("--track", action="store_true",
+                        help="track the cube during the descent and the grasp (visual servoing, Option B)")
     parser.add_argument("--motion", choices=["static", "circle", "sway", "jitter"],
                         help="dynamic target: a hand holds the cube and moves it (hand_motion.py)")
     parser.add_argument("--speed", type=float, default=0.0, help="hand speed in cm/s (with --motion)")
