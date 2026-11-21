@@ -1,5 +1,7 @@
 # Robust pick-and-place in MuJoCo, driven by evaluation
 
+[![tests](https://github.com/mahesaputranata/mujoco-manipulation/actions/workflows/tests.yml/badge.svg)](https://github.com/mahesaputranata/mujoco-manipulation/actions/workflows/tests.yml)
+
 A 6-DOF UR5e arm with a Robotiq 2F-85 gripper picks a cube and places it in a box, in the
 [MuJoCo](https://mujoco.org) physics simulator. The inverse kinematics is written from scratch.
 The focus is **measuring** how robust the system is, then fixing what the measurements show.
@@ -39,6 +41,7 @@ cube pose ──► planner ──► IK ──► smooth joint trajectory ─�
 | [`render_trials.py`](render_trials.py) | Replays any trial from its seed as a GIF (also side by side) |
 | [`plot_controllers.py`](plot_controllers.py) | Controller comparison and tracking figures |
 | [`scene.py`](scene.py) | Builds the scene with `MjSpec`: UR5e + 2F-85 from MuJoCo Menagerie, cube, box |
+| [`tests/`](tests) | Unit, integration and regression tests (pytest), run by CI on every push |
 | [`fundamentals/`](fundamentals) | DH-parameter visualizers; FK/Jacobian/IK derivation drill in PyTorch |
 
 The **original system** is the first working version: fixed grasp orientation, single-start IK,
@@ -153,6 +156,31 @@ Each fix came from replaying a specific failed trial, not from guessing.
    look again and re-plan once.
 6. **Gravity sag and closing before the arm arrives** (see Control). **Fix:** gravity
    compensation, and wait for the arm to arrive before closing or releasing.
+
+## Testing
+
+Two layers, for two different questions:
+
+- **Is each part correct?** A pytest suite (226 tests, ~20 s) runs on every push via GitHub Actions:
+  - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
+    detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
+  - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
+    are tested automatically), and a precision check for the final set-up;
+  - *regression:* previously fixed failures stay fixed (trial 7: IK local minimum; trial 85: box
+    wall), a success floor in the hardest setting, and seed reproducibility.
+- **How well does the whole system work?** `eval_place.py`: scenario-based statistical evaluation
+  (the results above).
+
+The tests were checked by injecting bugs on purpose. Flipping the sign of gravity compensation, or
+making the grasp ignore the cube's yaw, must make tests fail. The second one first went
+unnoticed, which exposed a gap: an unaligned but well-centred gripper can hold a cube rotated by
+30–40° by its corners without twisting it, so the twist check now also runs at 10° and 20°.
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q                # all tests
+.venv/bin/python -m pytest -q -m "not slow"  # skip the longer success-floor run
+```
 
 ## Limitations
 
