@@ -32,7 +32,7 @@ def draw_outline(img, camera, x, y, yaw, half, color, thickness):
                  cv2.LINE_AA, shift=2)
 
 
-def main(x=0.48, y=0.22, yaw_deg=25.0, half=0.025, crop=(318, 235, 80, 60), S=6):
+def main(x=0.48, y=0.22, yaw_deg=25.0, half=0.025, crop=(314, 211, 80, 60), S=6):
     model, data = build_model(cube_half=half)
     place_cube(model, data, (x, y), np.radians(yaw_deg))
     cam = CameraPerception(model)

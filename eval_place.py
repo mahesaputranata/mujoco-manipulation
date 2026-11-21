@@ -27,15 +27,17 @@ import csv
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 import os
+import sys
 import time
 from collections import Counter
 from pathlib import Path
 
+import mujoco
 import numpy as np
 
 from controllers import CONTROLLERS
 from demo_reach import METRICS, OUTCOMES, ground_truth, make_stepper, pick_and_place, run_in_viewer, wrap_cube_angle
-from scene import BOX_POS, CUBE_HALF, CUBE_MASS, build_model, cube_yaw, place_cube
+from scene import BOX_POS, CUBE_HALF, CUBE_MASS, SCENE_CAMERA, build_model, cube_yaw, place_cube
 
 ROOT = Path(__file__).parent
 
@@ -67,10 +69,33 @@ def sample_trial(i, args, repeat=0):
     if repeat:
         trial["noise_seed"] = int(np.random.default_rng([args.seed, i, repeat]).integers(2**31))
     trial["repeat"] = repeat
+    if args.camera_rot or args.camera_shift or args.focal_err:
+        # Camera calibration error: magnitudes from the flags, directions from their own seed, so
+        # trial i bumps the camera the same way in every method (ideal / stale / marker).
+        trial.update(cam_rot_deg=args.camera_rot, cam_shift_mm=args.camera_shift, focal_err_pct=args.focal_err,
+                     bump_seed=int(np.random.default_rng([args.seed, i, 1000]).integers(2**31)))
     return trial
 
 
-PERCEPTION_METRICS = ["perc_pos_err_mm", "perc_yaw_err_deg", "perc_z_err_mm", "perc_glitches"]
+PERCEPTION_METRICS = ["perc_pos_err_mm", "perc_yaw_err_deg", "perc_z_err_mm", "perc_glitches",
+                      "calib_pos_err_mm", "calib_rot_err_deg", "tags_seen"]
+
+
+def bump_camera(model, data, trial):
+    """Move the real scene camera as if the tripod was knocked: rotate it about its own position
+    (random axis) and shift it (random direction), by the trial's magnitudes. Returns the focal-length
+    factor that perception believes (1 + error, random sign): the lens was calibrated imperfectly."""
+    rng = np.random.default_rng(trial["bump_seed"])
+    axis, direction = rng.normal(size=3), rng.normal(size=3)
+    sign = rng.choice([-1.0, 1.0])
+    cam = model.camera(SCENE_CAMERA).id
+    q_bump, q_new = np.empty(4), np.empty(4)
+    mujoco.mju_axisAngle2Quat(q_bump, axis / np.linalg.norm(axis), np.radians(trial["cam_rot_deg"]))
+    mujoco.mju_mulQuat(q_new, q_bump, model.cam_quat[cam])  # rotation in the world frame
+    model.cam_quat[cam] = q_new
+    model.cam_pos[cam] += direction / np.linalg.norm(direction) * trial["cam_shift_mm"] / 1000
+    mujoco.mj_forward(model, data)
+    return 1.0 + sign * trial["focal_err_pct"] / 100
 
 
 class Perceiver:
@@ -84,12 +109,12 @@ class Perceiver:
     accuracy is measured on every trial, for the oracle-with-noise and the camera alike.
     """
 
-    def __init__(self, model, args, rng):
-        self.args, self.rng = args, rng
+    def __init__(self, model, args, rng, believed=None, f_belief=None):
+        self.model, self.args, self.rng = model, args, rng
         self.camera = None
         if args.perception == "camera":
             from perception import CameraPerception  # needs OpenCV and an OpenGL context
-            self.camera = CameraPerception(model)
+            self.camera = CameraPerception(model, calibration=args.calibration, believed=believed, f_belief=f_belief)
         self.first = None
 
     def __call__(self, data):
@@ -108,10 +133,17 @@ class Perceiver:
             self.first = dict(perc_pos_err_mm=1000 * np.linalg.norm(pos[:2] - true_pos[:2]),
                               perc_yaw_err_deg=np.degrees(wrap_cube_angle(yaw - true_yaw)),
                               perc_z_err_mm=1000 * (pos[2] - true_pos[2]))
+            if self.camera is not None:  # how wrong was the camera belief behind this estimate?
+                from perception import PinholeCamera
+                true_cam, belief = PinholeCamera(self.model, data), self.camera.belief
+                cos = np.clip((np.trace(belief.R.T @ true_cam.R) - 1) / 2, -1, 1)
+                self.first.update(calib_pos_err_mm=1000 * np.linalg.norm(belief.pos - true_cam.pos),
+                                  calib_rot_err_deg=np.degrees(np.arccos(cos)), tags_seen=self.camera.tags)
         return pos, yaw
 
     def metrics(self):
-        m = dict(self.first or {k: np.nan for k in PERCEPTION_METRICS})
+        m = {k: np.nan for k in PERCEPTION_METRICS}
+        m.update(self.first or {})
         m["perc_glitches"] = self.camera.glitches if self.camera is not None else np.nan
         return m
 
@@ -125,8 +157,17 @@ def setup_trial(trial, args):
     model, data = build_model(cube_half=trial["half"], cube_mass=trial["mass"], cube_friction=trial["friction"])
     place_cube(model, data, (trial["x"], trial["y"]), np.radians(trial["yaw_deg"]))
     rng = np.random.default_rng(trial["noise_seed"])
+    believed = f_belief = None
+    if args.perception == "camera":
+        from perception import PinholeCamera
+        believed = PinholeCamera(model, data)  # the camera as calibrated, before any bump
+        f_belief = believed.f
+        if "bump_seed" in trial:
+            f_belief = believed.f * bump_camera(model, data, trial)
+            believed.f = f_belief
     baseline = trial.get("baseline", args.baseline)  # the yaw sweep runs both planners in one go
-    return model, data, dict(perceive=Perceiver(model, args, rng), align=not baseline,
+    perceive = Perceiver(model, args, rng, believed, f_belief)
+    return model, data, dict(perceive=perceive, align=not baseline,
                              retries=0 if baseline else args.retries,
                              ik_restarts=0 if baseline else args.ik_restarts,
                              arrive=not (baseline or args.no_arrive))
@@ -200,6 +241,11 @@ def default_tag(args):
         parts.append("randphys")
     if args.perception == "camera":
         parts.append("camera")
+        if args.calibration != "ideal":
+            parts.append(args.calibration)
+        for flag, unit in (("camera_rot", "deg"), ("camera_shift", "mm"), ("focal_err", "pct")):
+            if getattr(args, flag):
+                parts.append(f"{flag.replace('camera_', '')}{getattr(args, flag):g}{unit}")
     return "_".join(parts)
 
 
@@ -231,6 +277,28 @@ def per_pose(rows):
         p["outcomes"] = " ".join(f"{o}:{n}" for o, n in sorted(p["outcomes"].items()))
         out.append(p)
     return out
+
+
+def write_run_info(path, args, wall):
+    """Next to every results CSV: exactly how it was produced, so a baseline stays traceable."""
+    import json
+    import platform
+    import subprocess
+    from datetime import datetime, timezone
+
+    def git(*cmd):
+        try:
+            return subprocess.run(["git", *cmd], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    import cv2
+    info = dict(command=" ".join(["eval_place.py"] + sys.argv[1:]), args=vars(args),
+                git_commit=git("rev-parse", "HEAD"), git_dirty=bool(git("status", "--porcelain", "--", "*.py")),
+                created=datetime.now(timezone.utc).isoformat(timespec="seconds"), wall_seconds=round(wall, 1),
+                versions=dict(python=platform.python_version(), mujoco=mujoco.__version__, numpy=np.__version__,
+                              opencv=cv2.__version__))
+    path.write_text(json.dumps(info, indent=2, default=str) + "\n")
 
 
 def write_csv(rows, path):
@@ -296,6 +364,12 @@ def add_scenario_args(parser):
     parser.add_argument("--rand-physics", action="store_true", help="random cube size, mass and friction")
     parser.add_argument("--perception", choices=["oracle", "camera"], default="oracle",
                         help="where the cube pose comes from: the simulator, or the fixed RGB camera")
+    parser.add_argument("--calibration", choices=["ideal", "stale", "marker"], default="ideal",
+                        help="camera perception's belief about the camera: the truth, the pose before the "
+                             "bump, or located from the ArUco tags")
+    parser.add_argument("--camera-rot", type=float, default=0.0, help="bump the real camera by this many degrees")
+    parser.add_argument("--camera-shift", type=float, default=0.0, help="shift the real camera by this many mm")
+    parser.add_argument("--focal-err", type=float, default=0.0, help="believed focal length off by this many %%")
     parser.add_argument("--controller", choices=CONTROLLERS,
                         help="arm controller for the improved planner (default pd_gravity; --baseline always uses pd)")
     parser.add_argument("--no-arrive", action="store_true",
@@ -339,6 +413,7 @@ def main():
     out = ROOT / "results" / tag
     out.mkdir(parents=True, exist_ok=True)
     write_csv(rows, out / "trials.csv")
+    write_run_info(out / "run_info.json", args, wall)
     if args.yaw_sweep:
         for baseline, name in ((True, "original system"), (False, "improved system")):
             print_summary([r for r in rows if r["baseline"] == baseline], f"{tag} / {name}", wall)

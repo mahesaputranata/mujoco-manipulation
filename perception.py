@@ -18,7 +18,7 @@ import cv2
 import mujoco
 import numpy as np
 
-from scene import CUBE_HALF, SCENE_CAMERA
+from scene import CUBE_HALF, MARKER_SIZE, MARKER_Z, MARKERS, SCENE_CAMERA
 
 WIDTH, HEIGHT = 640, 480
 MIN_PIXELS = 30  # a smaller red blob is treated as "cube not seen" (occluded or out of view)
@@ -33,7 +33,12 @@ EDGE_PUSH = 0.25
 
 
 class PinholeCamera:
-    """Intrinsics and pose of a MuJoCo camera, and the pixel <-> world projections."""
+    """Intrinsics and pose of a camera, and the pixel <-> world projections.
+
+    Pixel convention: u to the right, v down, and the centre of pixel (i, j) is at (i + 0.5, j + 0.5).
+    PinholeCamera(model, data) reads the true camera from the simulator; from_pose builds one from a
+    believed pose (a stale calibration, or the pose estimated from the ArUco marker).
+    """
 
     def __init__(self, model, data, name=SCENE_CAMERA, width=WIDTH, height=HEIGHT):
         cam = model.camera(name)
@@ -41,6 +46,16 @@ class PinholeCamera:
         self.f = 0.5 * height / np.tan(np.radians(cam.fovy[0]) / 2)  # focal length in pixels
         self.pos = data.cam_xpos[cam.id].copy()
         self.R = data.cam_xmat[cam.id].reshape(3, 3).copy()  # columns: camera x, y, z axes in world
+
+    @classmethod
+    def from_pose(cls, pos, R, f, width=WIDTH, height=HEIGHT):
+        cam = cls.__new__(cls)
+        cam.pos, cam.R, cam.f, cam.width, cam.height = np.asarray(pos, float), np.asarray(R, float), f, width, height
+        return cam
+
+    def K(self):
+        """OpenCV camera matrix (in OpenCV's convention, pixel centres are at integer coordinates)."""
+        return np.array([[self.f, 0, self.width / 2 - 0.5], [0, self.f, self.height / 2 - 0.5], [0, 0, 1]])
 
     def pixel_rays(self, uv):
         """World-frame ray directions through pixel coordinates uv (N x 2, u right, v down)."""
@@ -62,6 +77,55 @@ class PinholeCamera:
         u = self.width / 2 + self.f * p_cam[:, 0] / -p_cam[:, 2]
         v = self.height / 2 - self.f * p_cam[:, 1] / -p_cam[:, 2]
         return np.stack([u, v], axis=1)
+
+
+# --- the camera locating itself from the ArUco marker ------------------------------------------
+
+_DETECTOR = None
+
+
+def marker_detector():
+    global _DETECTOR
+    if _DETECTOR is None:
+        params = cv2.aruco.DetectorParameters()
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX  # corners to a fraction of a pixel
+        _DETECTOR = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), params)
+    return _DETECTOR
+
+
+def marker_corners_world(marker_id):
+    """A tag's black-square corners in world coordinates, in ArUco's order: top-left, top-right,
+    bottom-right, bottom-left of the printed image. The texture lies with the image's right = world
+    +x and the image's up = world +y (checked against renders: 2 px fit, other orientations ~30 px)."""
+    h = MARKER_SIZE / 2
+    x, y = MARKERS[marker_id]
+    return np.array([[x - h, y + h, MARKER_Z], [x + h, y + h, MARKER_Z], [x + h, y - h, MARKER_Z],
+                     [x - h, y - h, MARKER_Z]])
+
+
+def locate_camera(rgb, f, width=WIDTH, height=HEIGHT, min_markers=1):
+    """Camera pose from the ArUco tags in the image, given the (believed) focal length f.
+
+    Returns (PinholeCamera, number of tags used), or (None, n) if fewer than min_markers are visible.
+    solvePnP finds the camera rotation and translation that map all visible tags' known corners
+    onto their detected pixels. Tags far apart pin the camera's angle down much better than the
+    four corners of one small tag.
+    """
+    corners, ids, _ = marker_detector().detectMarkers(rgb)
+    found = [] if ids is None else [(int(i), c) for i, c in zip(ids.ravel(), corners) if int(i) in MARKERS]
+    if len(found) < min_markers:
+        return None, len(found)
+    world = np.vstack([marker_corners_world(i) for i, _ in found])
+    pixels = np.vstack([c.reshape(4, 2) for _, c in found]).astype(np.float64)
+    K = PinholeCamera.from_pose(np.zeros(3), np.eye(3), f, width, height).K()
+    ok, rvec, tvec = cv2.solvePnP(world, pixels, K, None, flags=cv2.SOLVEPNP_SQPNP)
+    if not ok:
+        return None, len(found)
+    rvec, tvec = cv2.solvePnPRefineLM(world, pixels, K, None, rvec, tvec)
+    R_cv, _ = cv2.Rodrigues(rvec)  # world -> OpenCV camera frame (x right, y down, z forward)
+    pos = -R_cv.T @ tvec.ravel()
+    R = R_cv.T @ np.diag([1.0, -1.0, -1.0])  # MuJoCo camera axes: x right, y up, looking along -z
+    return PinholeCamera.from_pose(pos, R, f, width, height), len(found)
 
 
 def red_mask(rgb):
@@ -140,21 +204,41 @@ class CameraPerception:
     cameras deliver corrupted or stale frames too. So the camera looks at least twice and accepts
     an estimate only when it is plausible (a cube-sized cube) and two looks agree. `glitches`
     counts the looks that were thrown away; `last` holds the accepted estimate.
+
+    `calibration` is what perception believes about the camera:
+      ideal   the true camera, read from the simulator (perfect calibration)
+      stale   `believed`: a fixed PinholeCamera, e.g. the pose from before the tripod was bumped
+      marker  the camera pose located from the ArUco tags in each image, with focal length f_belief
+    `belief` holds the camera belief behind the accepted estimate, `tags` how many tags were used.
     """
 
-    def __init__(self, model, width=WIDTH, height=HEIGHT):
+    def __init__(self, model, width=WIDTH, height=HEIGHT, calibration="ideal", believed=None, f_belief=None):
         self.model = model
         self.renderer = mujoco.Renderer(model, height, width)
-        self.last = None
-        self.glitches = 0
+        self.calibration, self.believed, self.f_belief = calibration, believed, f_belief
+        self.last = self.belief = None
+        self.glitches, self.tags = 0, 0
 
     def image(self, data):
         self.renderer.update_scene(data, camera=SCENE_CAMERA)
         return self.renderer.render()
 
+    def camera_belief(self, rgb, data):
+        w, h = self.renderer.width, self.renderer.height
+        if self.calibration == "ideal":
+            return PinholeCamera(self.model, data, width=w, height=h)
+        if self.calibration == "stale":
+            return self.believed
+        camera, self.tags = locate_camera(rgb, self.f_belief, w, h)
+        return camera
+
     def look(self, data):
-        camera = PinholeCamera(self.model, data, width=self.renderer.width, height=self.renderer.height)
-        return estimate_from_image(self.image(data), camera)
+        rgb = self.image(data)
+        camera = self.camera_belief(rgb, data)
+        est = None if camera is None else estimate_from_image(rgb, camera)
+        if est is not None:
+            est["camera"] = camera
+        return est
 
     def __call__(self, data):
         self.last = None
@@ -170,7 +254,7 @@ class CameraPerception:
                 self.glitches += 1
                 continue
             if prev is not None and agree(prev, est):
-                self.last = est
+                self.last, self.belief = est, est["camera"]
                 return est["pos"].copy(), est["yaw"]
             if prev is not None:
                 self.glitches += 1

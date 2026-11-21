@@ -43,6 +43,7 @@ RGB camera ──► perception ──► planner ──► IK ──► smooth 
 | [`controllers.py`](controllers.py) | Joint PD (Menagerie servo) and PD + gravity compensation |
 | [`eval_place.py`](eval_place.py) | Randomized evaluation: success rate with 95% CI, failure types, margins, sweeps |
 | [`render_trials.py`](render_trials.py) | Replays any trial from its seed as a GIF (also side by side) |
+| [`calib_sweep.py`](calib_sweep.py) | Camera calibration experiment: knocked camera, stale belief vs self-locating from ArUco tags |
 | [`plot_controllers.py`](plot_controllers.py), [`plot_perception.py`](plot_perception.py) | Controller and perception figures |
 | [`scene.py`](scene.py) | Builds the scene with `MjSpec`: UR5e + 2F-85 from MuJoCo Menagerie, cube, box |
 | [`tests/`](tests) | Unit, integration and regression tests (pytest), run by CI on every push |
@@ -163,10 +164,10 @@ centre of the cube: projected onto the table it is about 2 cm off. Instead:
 
 | 100 trials (500 held out) | Oracle (exact pose) | Camera | Camera perception error |
 |---|---|---|---|
-| Default workspace | 100%, grasp 0.4 ± 0.2 mm | 100%, grasp 0.7 ± 0.4 mm | 0.4 ± 0.3 mm, 0.0 ± 0.4° |
-| + random cube physics | 100%, grasp 0.6 ± 0.2 mm | 100%, grasp 0.8 ± 0.4 mm | 0.4 ± 0.3 mm, 0.0 ± 0.4° |
-| Wide workspace | 100%, grasp 0.3 ± 0.2 mm | 100%, grasp 0.6 ± 0.4 mm | 0.5 ± 0.3 mm, 0.0 ± 0.3° |
-| **Held out: wide + physics, 500 trials** | | **500/500**, grasp 0.8 ± 0.5 mm | 0.6 ± 0.4 mm (max 2.2), 0.0 ± 0.5° |
+| Default workspace | 100%, grasp 0.4 ± 0.2 mm | 100%, grasp 0.7 ± 0.4 mm | 0.5 ± 0.3 mm, 0.0 ± 0.4° |
+| + random cube physics | 100%, grasp 0.6 ± 0.2 mm | 100%, grasp 0.8 ± 0.4 mm | 0.4 ± 0.3 mm, 0.1 ± 0.4° |
+| Wide workspace | 100%, grasp 0.3 ± 0.2 mm | 100%, grasp 0.7 ± 0.4 mm | 0.5 ± 0.3 mm, 0.0 ± 0.4° |
+| **Held out: wide + physics, 500 trials** | | **500/500**, grasp 0.8 ± 0.5 mm | 0.6 ± 0.4 mm (max 1.8), 0.0 ± 0.5° |
 
 What the measurements taught:
 
@@ -178,9 +179,50 @@ What the measurements taught:
   camera now looks twice and accepts only plausible, consistent estimates (rejected frames are
   counted), and the evaluation re-runs trials whose worker crashed instead of hanging.
 
-The simulated camera is close to ideal: perfect lighting, no lens distortion or sensor noise, and
-an exactly known camera pose. On real hardware, camera calibration error will dominate; the noise
-sweep above says the system needs it under about 10 mm / 10°.
+The simulated camera is close to ideal: perfect lighting, no lens distortion or sensor noise. The
+next section drops the last idealization, an exactly known camera pose.
+
+## Camera calibration: what happens when the tripod moves
+
+The camera-to-table geometry above needs the camera's exact pose (position and angle) and focal
+length. On a real desk these come from a calibration that is never perfect, and a tripod gets
+knocked. `calib_sweep.py` moves the *real* camera (rotation about a random axis, a shift in a random
+direction, a wrongly believed focal length), one factor at a time, 100 trials per point, and compares
+what perception believes:
+
+- **stale:** the camera pose from before the knock (nobody noticed the tripod moved);
+- **marker:** the camera locates itself in every image from four printed **ArUco tags** at known
+  spots on the table (two near the robot base, two beyond the far edge of the workspace), with
+  OpenCV's `solvePnP`.
+
+![success and cube error vs camera calibration error](results/calibration/calibration.png)
+
+| Camera error that still keeps success ≥ 95% | Stale calibration | Self-locating (4 tags) |
+|---|---|---|
+| Rotation | **0.5°** (93% at 1°, 41% at 2°, 16% at 3°) | **≥ 3°** (100% everywhere tested) |
+| Shift | **10 mm** (83% at 20 mm) | **≥ 20 mm** |
+| Focal length | ≥ 5% (cube error 6.8 mm) | ≥ 5% (cube error 1.3 mm) |
+| A realistic knock: 1°, 5 mm, 2% at once | 93%, cube error 14 mm | **100%, cube error 0.7 mm** |
+
+What the measurements showed:
+
+- **Angle errors dominate.** With a stale calibration the cube error grows by about 15 mm per
+  degree, exactly the prediction *camera distance × tan(angle)* (the dash-dot line). Since the
+  system tolerates ~10 mm, a tripod knocked by **half a degree** is already at the limit. Shifts
+  matter 1:1 (10 mm of camera shift → 10 mm of cube error), so they are much more forgiving.
+- **One tag is not enough.** A single 8 cm tag located the camera so poorly (47 mm, 1.3°) that the
+  cube error was 19 mm, worse than a 1° knock. Four tags spread across the table brought it to
+  0.6 mm, as good as knowing the true camera: corners far apart pin the camera's angle down.
+- **The camera's view needs a margin.** At first the far tags sat on the bottom edge of the image,
+  and a 1° knock pushed them out of view, exactly when they were needed. The camera was re-aimed
+  so all tags stay in view after a 3° knock.
+- **The tags even absorb a wrong focal length** (a prediction that turned out wrong: I expected the
+  marker method could not fix lens errors). With the focal length 5% off, the located camera is
+  4 cm away from the truth, but rays to the table still land in the right places, because the
+  cube lies almost in the tags' plane. The error comes back only with height: 1.3 mm at 5%.
+
+For a real desk: tape four printed tags around the workspace, and the robot can re-locate its camera
+from every image, so a knocked tripod stops being a silent failure.
 
 ## What failed, and the fixes
 
@@ -206,7 +248,7 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (243 tests, ~40 s) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (251 tests, ~40 s) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
@@ -214,8 +256,9 @@ Two layers, for two different questions:
   - *regression:* previously fixed failures stay fixed (trial 7: IK local minimum; trial 85: box
     wall), a success floor in the hardest setting, and seed reproducibility;
   - *perception:* camera projection round trips, cube pose recovered from synthetic images with a
-    known answer, rendered-image accuracy, rejection of bad frames, and an end-to-end run with
-    the camera. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
+    known answer, rendered-image accuracy, rejection of bad frames, an end-to-end run with the
+    camera, and the calibration experiment (the camera is knocked by exactly the requested amount,
+    every method gets the same knock, the tags locate the camera, stale misses after a 2° knock). CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
 - **How well does the whole system work?** `eval_place.py`: scenario-based statistical evaluation
   (the results above).
 
@@ -255,6 +298,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python eval_place.py --baseline                         # original system
 .venv/bin/python eval_place.py --workspace wide --pos-noise 5 --yaw-noise 5 --rand-physics
 .venv/bin/python eval_place.py --perception camera               # the arm finds the cube with its camera
+.venv/bin/python calib_sweep.py                                   # camera calibration experiment (~20 min, resumable)
 .venv/bin/python eval_place.py --controller pd --no-arrive        # improved planner, original control
 .venv/bin/python eval_place.py --yaw-sweep --pos-noise 5 --yaw-noise 5 --repeats 10 --sweep-step 3
 .venv/bin/python eval_place.py --baseline --workspace wide --replay 7   # replay one trial in 3D
@@ -262,7 +306,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python plot_controllers.py                              # controller figures (needs the runs above)
 ```
 
-100 trials take about 20 s on 8 CPU cores. Results go to `results/<tag>/`.
+100 trials take about 20 s on 8 CPU cores. Results go to `results/<tag>/`: `trials.csv` (one row per
+trial, with its seed) and `run_info.json` (the exact settings, git commit and library versions), so
+every baseline stays traceable and every trial reproducible.
 
 ## Roadmap
 
@@ -272,7 +318,8 @@ vision-language-action (VLA) policy.
 - [x] Scene, damped least-squares IK from scratch, pick-and-place
 - [x] Randomized evaluation and robustness fixes
 - [x] Gravity compensation and wait-to-arrive; controller comparison
-- [x] Camera perception: fixed RGB camera, cube pose from the image (this page)
+- [x] Camera perception: fixed RGB camera, cube pose from the image
+- [x] Camera calibration experiment; self-locating camera from ArUco tags (this page)
 - [ ] Computed-torque control (removes the motion lag), then operational-space / impedance
       control for contact-rich tasks (in progress)
 

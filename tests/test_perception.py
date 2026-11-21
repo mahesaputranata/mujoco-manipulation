@@ -165,3 +165,75 @@ def test_pick_and_place_with_camera(gl):
     assert row["outcome"] == "OK"
     assert row["perc_pos_err_mm"] < 4
     assert row["perc_glitches"] == 0
+
+
+# --- camera calibration error (calib_sweep.py) ----------------------------------------------------
+
+def rotation_angle_deg(Ra, Rb):
+    return np.degrees(np.arccos(np.clip((np.trace(Ra.T @ Rb) - 1) / 2, -1, 1)))
+
+
+def bumped(rot=0.0, shift=0.0, focal=0.0, trial_index=0, calibration="stale"):
+    """Set up a camera trial with a bumped camera; returns (model, data, kwargs, believed camera)."""
+    import eval_place
+
+    args = scenario_args("--perception", "camera", "--calibration", calibration, "--camera-rot", str(rot),
+                         "--camera-shift", str(shift), "--focal-err", str(focal))
+    return eval_place.setup_trial(eval_place.sample_trial(trial_index, args), args)
+
+
+@pytest.mark.parametrize("rot,shift", [(1.0, 0.0), (0.0, 10.0), (2.0, 5.0)])
+def test_bump_moves_the_real_camera_by_the_requested_amount(rot, shift):
+    model, data, kwargs = bumped(rot, shift)
+    try:
+        nominal = PinholeCamera(*build_model())
+        true = PinholeCamera(model, data)
+        assert rotation_angle_deg(true.R, nominal.R) == pytest.approx(rot, abs=1e-4)  # arccos rounding
+        assert 1000 * np.linalg.norm(true.pos - nominal.pos) == pytest.approx(shift, abs=1e-6)
+    finally:
+        kwargs["perceive"].close()
+
+
+def test_every_method_gets_the_same_bump():
+    """Trial i must bump the camera identically for stale and marker, or the comparison is unfair."""
+    cams = []
+    for calibration in ("stale", "marker"):
+        model, data, kwargs = bumped(2.0, 10.0, 2.0, trial_index=4, calibration=calibration)
+        cams.append(PinholeCamera(model, data))
+        kwargs["perceive"].close()
+    assert np.allclose(cams[0].R, cams[1].R) and np.allclose(cams[0].pos, cams[1].pos)
+
+
+def test_stale_without_bump_is_the_true_camera():
+    model, data, kwargs = bumped()
+    believed = kwargs["perceive"].camera.believed
+    true = PinholeCamera(model, data)
+    kwargs["perceive"].close()
+    assert np.allclose(believed.R, true.R) and np.allclose(believed.pos, true.pos) and believed.f == true.f
+
+
+def test_camera_locates_itself_from_the_tags(gl):
+    from perception import locate_camera
+
+    model, data = build_model()
+    true = PinholeCamera(model, data)
+    cam = CameraPerception(model)
+    try:
+        located, tags = locate_camera(cam.image(data), true.f)
+    finally:
+        cam.close()
+    assert tags == 4
+    assert 1000 * np.linalg.norm(located.pos - true.pos) < 3
+    assert rotation_angle_deg(located.R, true.R) < 0.15
+
+
+@pytest.mark.parametrize("calibration,max_err_mm,min_err_mm", [("marker", 3, 0), ("stale", 1000, 15)])
+def test_bumped_camera_stale_vs_marker(gl, calibration, max_err_mm, min_err_mm):
+    """After a 2 deg knock, the stale belief misses the cube by centimetres; the tags fix it."""
+    model, data, kwargs = bumped(rot=2.0, trial_index=1, calibration=calibration)
+    try:
+        seen = kwargs["perceive"](data)
+    finally:
+        kwargs["perceive"].close()
+    err = 1000 * np.linalg.norm(seen[0][:2] - data.body("cube").xpos[:2])
+    assert min_err_mm <= err < max_err_mm

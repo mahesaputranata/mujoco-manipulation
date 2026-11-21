@@ -1,0 +1,42 @@
+{
+  "command": "eval_place.py --perception camera --calibration marker --trials 100 --tag calibration/marker_rotation1 --camera-rot 1",
+  "args": {
+    "seed": 0,
+    "baseline": false,
+    "retries": 1,
+    "ik_restarts": 8,
+    "workspace": "default",
+    "pos_noise": 0.0,
+    "yaw_noise": 0.0,
+    "rand_physics": false,
+    "perception": "camera",
+    "calibration": "marker",
+    "camera_rot": 1.0,
+    "camera_shift": 0.0,
+    "focal_err": 0.0,
+    "controller": null,
+    "no_arrive": false,
+    "trials": 100,
+    "repeats": 1,
+    "workers": 8,
+    "tag": "calibration/marker_rotation1",
+    "replay": null,
+    "repeat": 0,
+    "yaw_sweep": false,
+    "sweep_xy": [
+      0.45,
+      0.2
+    ],
+    "sweep_step": 1.0
+  },
+  "git_commit": "80da8ff4308777417889171c6a5a741301afa01d",
+  "git_dirty": true,
+  "created": "2026-11-21T13:46:08+00:00",
+  "wall_seconds": 28.9,
+  "versions": {
+    "python": "3.10.12",
+    "mujoco": "3.17.0",
+    "numpy": "2.2.6",
+    "opencv": "5.1.0"
+  }
+}

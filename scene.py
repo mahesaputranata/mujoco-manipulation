@@ -29,9 +29,18 @@ BOX_POS = (0.40, -0.30, 0.0)
 # Fixed "tripod" camera in front of the table, looking down at the workspace at about 45 deg,
 # like a webcam on a stand at a desk (eye-to-hand). Used by perception.py.
 SCENE_CAMERA = "scene_cam"
-CAMERA_EYE = (0.98, 0.15, 0.72)
-CAMERA_TARGET = (0.40, 0.15, 0.0)
+CAMERA_EYE = (1.02, 0.15, 0.80)
+CAMERA_TARGET = (0.46, 0.15, 0.0)
 CAMERA_FOVY = 55.0  # vertical field of view, degrees
+
+# Printed ArUco tags (DICT_4X4_50) lying flat on the table at known positions, like a mat with a
+# tag in each corner: two near the robot base, two beyond the far edge of the workspace. All are in
+# the camera's view and outside the area where the cube can be. The camera can locate itself from
+# them (perception.py, --calibration marker). Each entry: id -> (x, y) of the tag's centre.
+# MARKER_SIZE is the black square's side; the printed sheet adds a white border of 0.2 x that.
+MARKERS = {0: (0.18, 0.10), 1: (0.17, -0.12), 2: (0.79, -0.22), 3: (0.79, 0.48)}
+MARKER_SIZE = 0.08
+MARKER_Z = 0.0005  # just above the floor, so the two surfaces don't flicker
 
 
 def look_at_xyaxes(eye, target, up=(0.0, 0.0, 1.0)):
@@ -95,6 +104,14 @@ def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0) -> m
                   rgba=[0.85, 0.15, 0.15, 1], mass=cube_mass, friction=[cube_friction, 0.005, 0.0001])
 
     _add_open_box(world, "box", BOX_POS)
+    sheet = MARKER_SIZE * 1.4 / 2  # half side of the printed sheet, white border included
+    for marker_id, (mx, my) in MARKERS.items():
+        name = f"aruco{marker_id}"
+        arm.add_texture(name=name, type=mujoco.mjtTexture.mjTEXTURE_2D,
+                        file=str(ROOT / "assets" / f"aruco_4x4_id{marker_id}.png"))
+        arm.add_material(name=name, textures=["", name], texrepeat=[1, 1], specular=0, shininess=0)
+        world.add_geom(name=f"marker{marker_id}", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[sheet, sheet, 0.01],
+                       pos=[mx, my, MARKER_Z], material=name, contype=0, conaffinity=0)
     world.add_camera(name=SCENE_CAMERA, pos=CAMERA_EYE, fovy=CAMERA_FOVY,
                      xyaxes=look_at_xyaxes(CAMERA_EYE, CAMERA_TARGET))
     return arm

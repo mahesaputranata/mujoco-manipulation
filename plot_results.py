@@ -133,3 +133,54 @@ if __name__ == "__main__":
     with open(csv_path) as f:
         rows = [{**r, "x": float(r["x"]), "y": float(r["y"])} for r in csv.DictReader(f)]
     plot_outcomes(rows, csv_path.with_name("outcomes.png"), csv_path.parent.name)
+
+
+METHOD_STYLE = {"stale": ("#eb6834", "stale calibration (tripod moved, nobody noticed)"),
+                "marker": ("#2a78d6", "self-locating camera (4 ArUco tags)")}
+
+
+def plot_calibration(rows, sweeps, path):
+    """Camera calibration experiment: success rate and cube error vs each error, per method."""
+    from scene import CAMERA_EYE, CAMERA_TARGET
+
+    fig, axes = plt.subplots(2, len(sweeps), figsize=(12, 6.6), sharex="col")
+    fig.patch.set_facecolor(SURFACE)
+    fig.suptitle("Camera calibration error: what the system tolerates (100 trials per point)", color=INK,
+                 fontsize=12, x=0.01, ha="left")
+    zero = {r["method"]: r for r in rows if r["factor"] == "none"}
+    distance = np.linalg.norm(np.subtract(CAMERA_EYE, CAMERA_TARGET))
+    for col, (factor, (_, values, unit)) in enumerate(sweeps.items()):
+        ax_ok, ax_err = axes[0, col], axes[1, col]
+        for ax in (ax_ok, ax_err):
+            _style_axes(ax)
+        for method, (color, label) in METHOD_STYLE.items():
+            pts = [zero[method]] if method in zero else []
+            pts += sorted((r for r in rows if r["method"] == method and r["factor"] == factor),
+                          key=lambda r: r["magnitude"])
+            x = [0.0 if r["factor"] == "none" else r["magnitude"] for r in pts]
+            ax_ok.plot(x, [100 * r["success"] for r in pts], color=color, lw=2, marker="o", ms=5, label=label,
+                       zorder=3)
+            ax_ok.fill_between(x, [100 * r["ci_lo"] for r in pts], [100 * r["ci_hi"] for r in pts], color=color,
+                               alpha=0.15, lw=0)
+            ax_err.plot(x, [r["perc_err_median"] for r in pts], color=color, lw=2, marker="o", ms=5, zorder=3)
+            ax_err.plot(x, [r["perc_err_p90"] for r in pts], color=color, lw=1, ls="--", zorder=3)
+        ax_err.axhline(10, color=INK_2, lw=0.8, ls=":")
+        ax_err.annotate("~10 mm: limit from the noise sweep", (0, 10), (4, 3), textcoords="offset points",
+                        color=INK_2, fontsize=8)
+        if factor == "rotation":
+            th = np.linspace(0.05, max(values), 50)
+            ax_err.plot(th, 1000 * distance * np.tan(np.radians(th)), color=INK_2, lw=1, ls="-.",
+                        label="prediction: distance × tan(angle)")
+            ax_err.legend(frameon=False, fontsize=8, loc="center right")
+        ax_ok.set_title(f"{factor} error", color=INK, fontsize=10, loc="left")
+        ax_ok.set_ylim(-5, 105)
+        ax_err.set_yscale("log")
+        ax_err.set_xlabel(f"camera {factor} error ({unit})", color=INK_2)
+    axes[0, 0].set_ylabel("success (%)", color=INK_2)
+    axes[1, 0].set_ylabel("cube position error (mm)\nmedian, dashed = 90th percentile", color=INK_2, fontsize=9)
+    leg = axes[0, 0].legend(frameon=False, fontsize=8, loc="lower left")
+    for text in leg.get_texts():
+        text.set_color(INK)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
