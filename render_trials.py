@@ -43,8 +43,8 @@ def make_camera():
 class FilmingStepper(Stepper):
     """A Stepper that also renders a frame every `every` physics steps."""
 
-    def __init__(self, model, data, controller, renderer, every):
-        super().__init__(model, data, controller=controller)
+    def __init__(self, model, data, controller, renderer, every, hooks=()):
+        super().__init__(model, data, controller=controller, hooks=hooks)
         self.renderer, self.every, self.cam = renderer, every, make_camera()
         self.frames, self.count = [], 0
 
@@ -64,7 +64,7 @@ def render_trial(trial, args, width, height, speed):
     model, data, kwargs = setup_trial(trial, args)
     renderer = mujoco.Renderer(model, height, width)
     every = max(1, round(speed / (FPS * model.opt.timestep)))  # physics steps per GIF frame
-    step = FilmingStepper(model, data, controller_for(trial, args), renderer, every)
+    step = FilmingStepper(model, data, controller_for(trial, args), renderer, every, kwargs.pop("hooks"))
     outcome, attempts = pick_and_place(model, data, step, **kwargs)
     frames = step.frames or [step.snapshot()] * FPS  # e.g. IK_FAIL before any motion: a still second
     renderer.close()

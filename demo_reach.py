@@ -135,7 +135,8 @@ def ground_truth(data):
     return data.body("cube").xpos.copy(), cube_yaw(data)
 
 
-METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "reach_error_mm", "track_error_mm",
+METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "target_shift_mm", "look_age_s",
+           "reach_error_mm", "track_error_mm",
            "hold_error_mm", "wait_s"]
 
 
@@ -191,6 +192,9 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
       track_error_mm    mean over all segment ends (the arm is still catching up after big moves)
       hold_error_mm     after the final settle, holding still (static sag)
       wait_s            total time spent waiting for the arm to arrive (with `arrive`)
+      target_shift_mm   when the gripper starts closing: how far the cube is from where the planner
+                        aimed (perception error plus how far a moving cube travelled since the look)
+      look_age_s        how old that look is when the gripper starts closing (s)
     """
     say = log or (lambda msg: None)
     m = metrics if metrics is not None else {}
@@ -204,6 +208,7 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
         m["wait_s"] += wait_until_arrived(model, data, step, q_target, grip, scratch)
     for attempt in range(1, retries + 2):
         seen = perceive(data)
+        looked_at = data.time
         if seen is None:  # camera perception: cube occluded or out of view
             say(f"attempt {attempt}: cube not seen")
             return "NOT_SEEN", attempt
@@ -218,6 +223,8 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
             if name == "down to cube":
                 yaw_before_close = cube_yaw(data)
                 m["reach_error_mm"] = seg_errors[-1]
+                m["target_shift_mm"] = 1000 * np.linalg.norm(data.body("cube").xpos[:2] - cube_pos[:2])
+                m["look_age_s"] = data.time - looked_at
             if name == "close gripper":
                 m["grasp_offset_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.site(TCP_SITE).xpos)[:2])
                 m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))
@@ -248,14 +255,15 @@ class Stepper:
 
     `controller` (see controllers.py) turns q_cmd into the arm actuator commands.
     `q_cmd` holds the last joint target. With a viewer, it also draws and runs in real time.
+    `hooks` are called as hook(model, data) before every physics step, e.g. a hand moving the cube.
 
     A class rather than a closure that stores attributes on itself: that closure refers to
     itself, a reference cycle that Python frees only occasionally. Every trial's MuJoCo
     model and data then stayed in memory (about 2 GB per worker after a few hundred trials).
     """
 
-    def __init__(self, model, data, viewer=None, controller="pd"):
-        self.model, self.data, self.viewer = model, data, viewer
+    def __init__(self, model, data, viewer=None, controller="pd", hooks=()):
+        self.model, self.data, self.viewer, self.hooks = model, data, viewer, list(hooks)
         self.gripper = model.actuator(GRIPPER_ACTUATOR).id
         self.ctl = CONTROLLERS[controller](model)
         self.q_cmd = data.ctrl[:6].copy()  # reset_home sets ctrl to the home joint angles
@@ -266,6 +274,8 @@ class Stepper:
         self.q_cmd = np.asarray(q_cmd, dtype=float).copy()
         data.ctrl[:6] = self.ctl(model, data, self.q_cmd)
         data.ctrl[self.gripper] = grip
+        for hook in self.hooks:
+            hook(model, data)
         mujoco.mj_step(model, data)
         if self.viewer is not None:
             if not self.viewer.is_running():
@@ -277,10 +287,10 @@ class Stepper:
 make_stepper = Stepper
 
 
-def run_in_viewer(model, data, controller="pd", **kwargs):
+def run_in_viewer(model, data, controller="pd", hooks=(), **kwargs):
     """Run pick_and_place in the 3D viewer, then hold the final pose until the window closes."""
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        step = make_stepper(model, data, viewer, controller)
+        step = make_stepper(model, data, viewer, controller, hooks)
         result = pick_and_place(model, data, step, **kwargs)
         print(f"Outcome: {result[0]} after {result[1]} attempt(s). Close the window to exit.")
         while viewer.is_running():

@@ -128,13 +128,6 @@ def plot_yaw_sweep(rows, path, title):
     plt.close(fig)
 
 
-if __name__ == "__main__":
-    csv_path = Path(sys.argv[1])
-    with open(csv_path) as f:
-        rows = [{**r, "x": float(r["x"]), "y": float(r["y"])} for r in csv.DictReader(f)]
-    plot_outcomes(rows, csv_path.with_name("outcomes.png"), csv_path.parent.name)
-
-
 METHOD_STYLE = {"stale": ("#eb6834", "stale calibration (tripod moved, nobody noticed)"),
                 "marker": ("#2a78d6", "self-locating camera (4 ArUco tags)")}
 
@@ -184,3 +177,69 @@ def plot_calibration(rows, sweeps, path):
     fig.tight_layout()
     fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
+
+
+MOTION_STYLE = {"circle": "#2a78d6", "sway": "#eb6834", "jitter": "#1baf7a"}  # palette slots 1-3
+
+
+def plot_dynamic(rows, motions, path):
+    """Dynamic targets: success rate and target shift vs the speed of the hand moving the cube."""
+    fig, (ax_ok, ax_shift) = plt.subplots(1, 2, figsize=(11, 4.4))
+    fig.patch.set_facecolor(SURFACE)
+    fig.suptitle("Dynamic targets: the planner looks once, then moves blindly (100 trials per point)", color=INK,
+                 fontsize=12, x=0.01, ha="left")
+    static = [r for r in rows if r["motion"] == "static"]
+    for ax in (ax_ok, ax_shift):
+        _style_axes(ax)
+        ax.set_xscale("log")
+    ages = []
+    for motion in motions:
+        color = MOTION_STYLE[motion]
+        pts = sorted((r for r in rows if r["motion"] == motion), key=lambda r: r["speed_cm_s"])
+        x = [r["speed_cm_s"] for r in pts]
+        ages += [r["look_age_s"] for r in pts]
+        ax_ok.plot(x, [100 * r["success"] for r in pts], color=color, lw=2, marker="o", ms=5, label=motion, zorder=3)
+        ax_ok.fill_between(x, [100 * r["ci_lo"] for r in pts], [100 * r["ci_hi"] for r in pts], color=color,
+                           alpha=0.15, lw=0)
+        ax_shift.plot(x, [r["shift_median"] for r in pts], color=color, lw=2, marker="o", ms=5, zorder=3)
+        ax_shift.plot(x, [r["shift_p90"] for r in pts], color=color, lw=1, ls="--", zorder=3)
+    if static:
+        ax_ok.axhline(100 * static[0]["success"], color=INK_2, lw=0.8, ls=":")
+        ax_ok.annotate("cube held still", (min(r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0),
+                                           100 * static[0]["success"]), (0, -12), textcoords="offset points",
+                       color=INK_2, fontsize=8)
+    if ages:  # a straight-line move covers speed x (time since the look)
+        v = np.logspace(np.log10(min(r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0)),
+                        np.log10(max(r["speed_cm_s"] for r in rows)), 50)
+        age = float(np.median(ages))
+        ax_shift.plot(v, 10 * v * age, color=INK_2, lw=1, ls="-.", label=f"speed × look age ({age:.1f} s)")
+        leg = ax_shift.legend(frameon=False, fontsize=8, loc="upper left")
+        for text in leg.get_texts():
+            text.set_color(INK)
+    speeds = sorted({r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0})
+    for ax in (ax_ok, ax_shift):
+        ax.set_xticks(speeds, [f"{v:g}" for v in speeds])
+        ax.minorticks_off()
+    ax_ok.set_ylim(-5, 105)
+    ax_ok.set_xlabel("hand speed (cm/s)", color=INK_2)
+    ax_ok.set_ylabel("success (%)", color=INK_2)
+    ax_ok.set_title("Success", color=INK, fontsize=10, loc="left")
+    ax_shift.set_yscale("log")
+    ax_shift.set_xlabel("hand speed (cm/s)", color=INK_2)
+    ax_shift.set_ylabel("cube distance from the aimed point\nwhen closing (mm; dashed = 90th pct)", color=INK_2,
+                        fontsize=9)
+    ax_shift.set_title("How far the cube moved since the look", color=INK, fontsize=10, loc="left")
+    leg = ax_ok.legend(frameon=False, fontsize=9, loc="lower left", title="hand motion")
+    leg.get_title().set_color(INK_2)
+    for text in leg.get_texts():
+        text.set_color(INK)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    csv_path = Path(sys.argv[1])
+    with open(csv_path) as f:
+        rows = [{**r, "x": float(r["x"]), "y": float(r["y"])} for r in csv.DictReader(f)]
+    plot_outcomes(rows, csv_path.with_name("outcomes.png"), csv_path.parent.name)

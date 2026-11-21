@@ -74,6 +74,11 @@ def sample_trial(i, args, repeat=0):
         # trial i bumps the camera the same way in every method (ideal / stale / marker).
         trial.update(cam_rot_deg=args.camera_rot, cam_shift_mm=args.camera_shift, focal_err_pct=args.focal_err,
                      bump_seed=int(np.random.default_rng([args.seed, i, 1000]).integers(2**31)))
+    if args.motion:
+        # Dynamic target: a hand holds the cube and moves it (hand_motion.py). Its own seed, so the
+        # pattern's direction and phase are the same for trial i at every speed.
+        trial.update(motion=args.motion, speed_cm_s=args.speed,
+                     motion_seed=int(np.random.default_rng([args.seed, i, 2000]).integers(2**31)))
     return trial
 
 
@@ -154,8 +159,13 @@ class Perceiver:
 
 def setup_trial(trial, args):
     """Build the scene for this trial (a fresh compile is ~0.05 s) and the pick_and_place settings."""
-    model, data = build_model(cube_half=trial["half"], cube_mass=trial["mass"], cube_friction=trial["friction"])
+    model, data = build_model(cube_half=trial["half"], cube_mass=trial["mass"], cube_friction=trial["friction"],
+                              with_hand="motion" in trial)
     place_cube(model, data, (trial["x"], trial["y"]), np.radians(trial["yaw_deg"]))
+    hooks = []
+    if "motion" in trial:
+        from hand_motion import HandMotion
+        hooks.append(HandMotion(model, data, trial["motion"], trial["speed_cm_s"], trial["motion_seed"]))
     rng = np.random.default_rng(trial["noise_seed"])
     believed = f_belief = None
     if args.perception == "camera":
@@ -167,7 +177,7 @@ def setup_trial(trial, args):
             believed.f = f_belief
     baseline = trial.get("baseline", args.baseline)  # the yaw sweep runs both planners in one go
     perceive = Perceiver(model, args, rng, believed, f_belief)
-    return model, data, dict(perceive=perceive, align=not baseline,
+    return model, data, dict(perceive=perceive, hooks=hooks, align=not baseline,
                              retries=0 if baseline else args.retries,
                              ik_restarts=0 if baseline else args.ik_restarts,
                              arrive=not (baseline or args.no_arrive))
@@ -191,12 +201,15 @@ def run_trial(trial):
     model, data, kwargs = setup_trial(trial, _worker["args"])
     t0 = time.perf_counter()
     metrics = {}
-    step = make_stepper(model, data, controller=controller_for(trial, _worker["args"]))
+    hooks = kwargs.pop("hooks")
+    step = make_stepper(model, data, controller=controller_for(trial, _worker["args"]), hooks=hooks)
     try:
         outcome, attempts = pick_and_place(model, data, step, metrics=metrics, **kwargs)
     finally:
         kwargs["perceive"].close()  # free the camera's OpenGL context: one per trial would leak
     metrics.update(kwargs["perceive"].metrics())
+    if hooks:  # dynamic target: did the hand hand the cube over?
+        metrics["handed_over"] = int(not hooks[0].held)
     return {**trial, "outcome": outcome, "attempts": attempts, **metrics, "seconds": time.perf_counter() - t0,
             "final_x": data.body("cube").xpos[0], "final_y": data.body("cube").xpos[1],
             "final_yaw_deg": np.degrees(cube_yaw(data))}
@@ -239,6 +252,8 @@ def default_tag(args):
         parts.append(f"noise{args.pos_noise:g}mm{args.yaw_noise:g}deg")
     if args.rand_physics:
         parts.append("randphys")
+    if args.motion:
+        parts.append(f"{args.motion}{args.speed:g}cms")
     if args.perception == "camera":
         parts.append("camera")
         if args.calibration != "ideal":
@@ -370,6 +385,9 @@ def add_scenario_args(parser):
     parser.add_argument("--camera-rot", type=float, default=0.0, help="bump the real camera by this many degrees")
     parser.add_argument("--camera-shift", type=float, default=0.0, help="shift the real camera by this many mm")
     parser.add_argument("--focal-err", type=float, default=0.0, help="believed focal length off by this many %%")
+    parser.add_argument("--motion", choices=["static", "circle", "sway", "jitter"],
+                        help="dynamic target: a hand holds the cube and moves it (hand_motion.py)")
+    parser.add_argument("--speed", type=float, default=0.0, help="hand speed in cm/s (with --motion)")
     parser.add_argument("--controller", choices=CONTROLLERS,
                         help="arm controller for the improved planner (default pd_gravity; --baseline always uses pd)")
     parser.add_argument("--no-arrive", action="store_true",

@@ -24,6 +24,7 @@ TCP_SITE = "gripper/pinch"  # tool centre point, between the fingertips
 CUBE_HALF = 0.025  # half the cube's edge length (m)
 CUBE_MASS = 0.1
 CUBE_START = (0.45, 0.20, CUBE_HALF)
+HAND, HAND_WELD = "hand", "hand_holds_cube"  # only in scenes built with_hand=True
 BOX_POS = (0.40, -0.30, 0.0)
 
 # Fixed "tripod" camera in front of the table, looking down at the workspace at about 45 deg,
@@ -73,7 +74,7 @@ def _add_open_box(world, name, pos, inner=0.14, wall=0.01, height=0.06):
     box.add_site(name=f"{name}_target", pos=[0, 0, height + 0.05], size=[0.01] * 3, rgba=[0, 1, 0, 0.3])
 
 
-def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0) -> mujoco.MjSpec:
+def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0, with_hand=False) -> mujoco.MjSpec:
     arm = mujoco.MjSpec.from_file(str(MENAGERIE / "universal_robots_ur5e" / "ur5e.xml"))
     gripper = mujoco.MjSpec.from_file(str(MENAGERIE / "robotiq_2f85" / "2f85.xml"))
 
@@ -112,14 +113,22 @@ def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0) -> m
         arm.add_material(name=name, textures=["", name], texrepeat=[1, 1], specular=0, shininess=0)
         world.add_geom(name=f"marker{marker_id}", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[sheet, sheet, 0.01],
                        pos=[mx, my, MARKER_Z], material=name, contype=0, conaffinity=0)
+    if with_hand:
+        # A "hand" that can hold the cube and move it (dynamic targets, hand_motion.py): a mocap body
+        # (moved directly by the script, no physics of its own) and a weld that ties the cube to it
+        # while held. No geoms, so it is invisible to the camera and touches nothing.
+        world.add_body(name=HAND, mocap=True, pos=[CUBE_START[0], CUBE_START[1], cube_half])
+        arm.add_equality(name=HAND_WELD, type=mujoco.mjtEq.mjEQ_WELD, objtype=mujoco.mjtObj.mjOBJ_BODY,
+                         name1=HAND, name2="cube", active=False,
+                         data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0])  # anchor, relative pose = identity, torque scale
     world.add_camera(name=SCENE_CAMERA, pos=CAMERA_EYE, fovy=CAMERA_FOVY,
                      xyaxes=look_at_xyaxes(CAMERA_EYE, CAMERA_TARGET))
     return arm
 
 
-def build_model(**cube):
-    """Compile the scene. Pass cube_half / cube_mass / cube_friction to change the cube."""
-    model = build_spec(**cube).compile()
+def build_model(**options):
+    """Compile the scene. Options: cube_half / cube_mass / cube_friction, with_hand (dynamic targets)."""
+    model = build_spec(**options).compile()
     data = mujoco.MjData(model)
     reset_home(model, data)
     return model, data
