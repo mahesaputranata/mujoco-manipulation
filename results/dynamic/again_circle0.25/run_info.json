@@ -1,0 +1,45 @@
+{
+  "command": "eval_place.py --perception camera --motion circle --speed 0.25 --trials 100 --tag dynamic/again_circle0.25 --look-again",
+  "args": {
+    "seed": 0,
+    "baseline": false,
+    "retries": 1,
+    "ik_restarts": 8,
+    "workspace": "default",
+    "pos_noise": 0.0,
+    "yaw_noise": 0.0,
+    "rand_physics": false,
+    "perception": "camera",
+    "calibration": "ideal",
+    "camera_rot": 0.0,
+    "camera_shift": 0.0,
+    "focal_err": 0.0,
+    "look_again": true,
+    "motion": "circle",
+    "speed": 0.25,
+    "controller": null,
+    "no_arrive": false,
+    "trials": 100,
+    "repeats": 1,
+    "workers": 8,
+    "tag": "dynamic/again_circle0.25",
+    "replay": null,
+    "repeat": 0,
+    "yaw_sweep": false,
+    "sweep_xy": [
+      0.45,
+      0.2
+    ],
+    "sweep_step": 1.0
+  },
+  "git_commit": "6a0e33652b7a898e0dff31530f16ba2b2d1dc393",
+  "git_dirty": true,
+  "created": "2026-11-21T21:11:30+00:00",
+  "wall_seconds": 44.1,
+  "versions": {
+    "python": "3.10.12",
+    "mujoco": "3.17.0",
+    "numpy": "2.2.6",
+    "opencv": "5.1.0"
+  }
+}

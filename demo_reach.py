@@ -136,7 +136,7 @@ def ground_truth(data):
 
 
 METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "target_shift_mm", "look_age_s",
-           "reach_error_mm", "track_error_mm",
+           "relook_seen", "relook_shift_mm", "reach_error_mm", "track_error_mm",
            "hold_error_mm", "wait_s"]
 
 
@@ -176,7 +176,7 @@ def wait_until_arrived(model, data, step, q_target, grip, scratch):
 
 
 def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
-                   metrics=None, arrive=True):
+                   metrics=None, arrive=True, look_again=False):
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
@@ -195,6 +195,10 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
       target_shift_mm   when the gripper starts closing: how far the cube is from where the planner
                         aimed (perception error plus how far a moving cube travelled since the look)
       look_age_s        how old that look is when the gripper starts closing (s)
+    With `look_again`, the planner takes a second look once the gripper is above the cube and
+    re-plans the descent from it, so the look is younger when the gripper closes:
+      relook_seen       1 if the second look saw the cube (the arm above it can block the view)
+      relook_shift_mm   how far the cube moved between the first and the second look
     """
     say = log or (lambda msg: None)
     m = metrics if metrics is not None else {}
@@ -216,15 +220,34 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
         plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
         if not ik_ok:
             return "IK_FAIL", attempt
-        targets = {seg[0]: seg[1] for seg in plan}
-        for name in run_plan(model, data, plan, step, wait if arrive else None):
+        # The plan can change mid-motion (look_again), so the loop reads it from `now`.
+        now = dict(plan=plan, cube_pos=cube_pos, quat=quat, looked_at=looked_at,
+                   targets={seg[0]: seg[1] for seg in plan})
+
+        def segments():
+            if not look_again:
+                yield from run_plan(model, data, now["plan"], step, wait if arrive else None)
+                return
+            yield from run_plan(model, data, now["plan"][:1], step)  # to above the cube
+            second = perceive(data)
+            m["relook_seen"] = int(second is not None)
+            if second is not None:
+                m["relook_shift_mm"] = 1000 * np.linalg.norm(second[0][:2] - now["cube_pos"][:2])
+                new_plan, ok, new_quat = make_plan(model, data, second[0], second[1], align, ik_restarts, log)
+                if ok:  # descend to where the cube is now; otherwise keep the first plan
+                    now.update(plan=new_plan, cube_pos=second[0], quat=new_quat, looked_at=data.time,
+                               targets={seg[0]: seg[1] for seg in new_plan})
+            yield from run_plan(model, data, now["plan"][1:], step, wait if arrive else None)
+
+        for name in segments():
+            cube_pos, quat, plan, targets = now["cube_pos"], now["quat"], now["plan"], now["targets"]
             seg_errors.append(1000 * tcp_error(model, data, targets[name], scratch))
             m["track_error_mm"] = np.mean(seg_errors)
             if name == "down to cube":
                 yaw_before_close = cube_yaw(data)
                 m["reach_error_mm"] = seg_errors[-1]
                 m["target_shift_mm"] = 1000 * np.linalg.norm(data.body("cube").xpos[:2] - cube_pos[:2])
-                m["look_age_s"] = data.time - looked_at
+                m["look_age_s"] = data.time - now["looked_at"]
             if name == "close gripper":
                 m["grasp_offset_mm"] = 1000 * np.linalg.norm((data.body("cube").xpos - data.site(TCP_SITE).xpos)[:2])
                 m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))

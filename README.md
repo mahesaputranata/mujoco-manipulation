@@ -236,9 +236,12 @@ trials each, with camera perception: `dynamic_sweep.py`.
 
 | Hand speed (cm/s) | 0.25 | 0.5 | 1 | 2 | 5 | 10 |
 |---|---|---|---|---|---|---|
-| circle | 100% | 100% | 0% | 0% | 11% | 8% |
-| sway | 100% | 100% | 0% | 24% | 85% | 90% |
-| jitter | 100% | 100% | 100% | 100% | 89% | 49% |
+| circle, looks once | 100% | 100% | 0% | 0% | 11% | 8% |
+| circle, **looks again** | 100% | 100% | **99%** | 0% | 0% | 1% |
+| sway, looks once | 100% | 100% | 0% | 24% | 85% | 90% |
+| sway, **looks again** | 100% | 100% | **100%** | **100%** | 76% | 94% |
+| jitter, looks once | 100% | 100% | 100% | 100% | 89% | 49% |
+| jitter, **looks again** | 100% | 100% | 100% | 100% | **95%** | **62%** |
 
 What the measurements showed:
 
@@ -253,8 +256,12 @@ What the measurements showed:
   measured cube travel shows why it isn't.
 - Jitter stays within a few cm of its start, so it is tolerated up to 2 cm/s.
 
-This is the baseline for the next step: look again during the approach, so that the look is not
-3.8 s old when the gripper closes.
+**Look again (Option A).** Once the gripper is above the cube, the planner takes a second look and
+re-plans the descent from it (`--look-again`). The second look saw the cube in every trial: the
+gripper above it does not block the camera's angled view. The look is now 1.8 s old when the gripper
+closes instead of 3.8 s, so the tolerated speed doubles: circle 0.5 → 1 cm/s, sway 0.5 → 2 cm/s,
+jitter 2 → 5 cm/s (success ≥ 95%). Still far below a real hand, which is why the next step tracks
+the cube continuously during the descent.
 
 ## What failed, and the fixes
 
@@ -280,7 +287,7 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (263 tests, ~40 s) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (265 tests, ~40 s) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
@@ -292,7 +299,8 @@ Two layers, for two different questions:
     camera, and the calibration experiment (the camera is knocked by exactly the requested amount,
     every method gets the same knock, the tags locate the camera, stale misses after a 2° knock);
   - *dynamic targets:* hand speeds, the weld carrying the cube, the handover, and a baseline test
-    that documents today's limit (a cube moving 1 cm/s is missed) until tracking removes it. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
+    that documents the look-once limit (a cube moving 1 cm/s is missed) next to the look-again
+    planner that catches it. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
 - **How well does the whole system work?** `eval_place.py`: scenario-based statistical evaluation
   (the results above).
 
@@ -334,7 +342,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python eval_place.py --workspace wide --pos-noise 5 --yaw-noise 5 --rand-physics
 .venv/bin/python eval_place.py --perception camera               # the arm finds the cube with its camera
 .venv/bin/python calib_sweep.py                                   # camera calibration experiment (~20 min, resumable)
-.venv/bin/python dynamic_sweep.py                                 # moving cube: success vs hand speed (~12 min, resumable)
+.venv/bin/python dynamic_sweep.py                                 # moving cube, look once vs again (~25 min, resumable)
 .venv/bin/python eval_place.py --controller pd --no-arrive        # improved planner, original control
 .venv/bin/python eval_place.py --yaw-sweep --pos-noise 5 --yaw-noise 5 --repeats 10 --sweep-step 3
 .venv/bin/python eval_place.py --baseline --workspace wide --replay 7   # replay one trial in 3D
@@ -356,7 +364,7 @@ vision-language-action (VLA) policy.
 - [x] Gravity compensation and wait-to-arrive; controller comparison
 - [x] Camera perception: fixed RGB camera, cube pose from the image
 - [x] Camera calibration experiment; self-locating camera from ArUco tags
-- [x] Dynamic targets: baseline (this page)
+- [x] Dynamic targets: baseline, and a second look above the cube (this page)
 - [ ] Computed-torque control (removes the motion lag), then operational-space / impedance
       control for contact-rich tasks (in progress)
 

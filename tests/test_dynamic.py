@@ -80,3 +80,18 @@ def test_motion_seed_is_the_same_at_every_speed():
     a = eval_place.sample_trial(5, scenario_args("--motion", "sway", "--speed", "1"))
     b = eval_place.sample_trial(5, scenario_args("--motion", "sway", "--speed", "10"))
     assert a["motion_seed"] == b["motion_seed"] and (a["x"], a["y"]) == (b["x"], b["y"])
+
+
+def test_look_again_catches_what_look_once_misses():
+    """Option A: a second look above the cube halves the look's age (3.8 s -> 1.8 s), so the cube
+    moving 1 cm/s that the look-once planner misses (see the baseline test) is caught."""
+    row = run(0, "--motion", "circle", "--speed", "1", "--perception", "camera", "--look-again")
+    assert row["outcome"] == "OK"
+    assert row["relook_seen"] == 1  # the gripper above the cube does not block the camera's view
+    assert row["look_age_s"] < 2.5
+    assert row["relook_shift_mm"] > 15  # moved ~2 s x 1 cm/s = 20 mm between the two looks
+
+
+def test_look_again_with_a_still_cube():
+    row = run(3, "--perception", "camera", "--look-again")
+    assert row["outcome"] == "OK" and row["relook_seen"] == 1 and row["relook_shift_mm"] < 3

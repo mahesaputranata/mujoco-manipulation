@@ -182,55 +182,56 @@ def plot_calibration(rows, sweeps, path):
 MOTION_STYLE = {"circle": "#2a78d6", "sway": "#eb6834", "jitter": "#1baf7a"}  # palette slots 1-3
 
 
-def plot_dynamic(rows, motions, path):
-    """Dynamic targets: success rate and target shift vs the speed of the hand moving the cube."""
-    fig, (ax_ok, ax_shift) = plt.subplots(1, 2, figsize=(11, 4.4))
+VARIANT_STYLE = {"once": ("--", 1.2, "looks once"), "again": ("-", 2.2, "looks again above the cube")}
+
+
+def plot_dynamic(rows, motions, path, variants=("once",)):
+    """Dynamic targets: success rate and target shift vs hand speed. Colour = hand motion,
+    line style = planner variant (dashed: looks once; solid: looks again above the cube)."""
+    variants = list(variants)
+    fig, (ax_ok, ax_shift) = plt.subplots(1, 2, figsize=(11.5, 4.6))
     fig.patch.set_facecolor(SURFACE)
-    fig.suptitle("Dynamic targets: the planner looks once, then moves blindly (100 trials per point)", color=INK,
-                 fontsize=12, x=0.01, ha="left")
-    static = [r for r in rows if r["motion"] == "static"]
+    fig.suptitle("Dynamic targets: a hand moves the cube while the robot grasps it (100 trials per point)",
+                 color=INK, fontsize=12, x=0.01, ha="left")
     for ax in (ax_ok, ax_shift):
         _style_axes(ax)
         ax.set_xscale("log")
-    ages = []
-    for motion in motions:
-        color = MOTION_STYLE[motion]
-        pts = sorted((r for r in rows if r["motion"] == motion), key=lambda r: r["speed_cm_s"])
-        x = [r["speed_cm_s"] for r in pts]
-        ages += [r["look_age_s"] for r in pts]
-        ax_ok.plot(x, [100 * r["success"] for r in pts], color=color, lw=2, marker="o", ms=5, label=motion, zorder=3)
-        ax_ok.fill_between(x, [100 * r["ci_lo"] for r in pts], [100 * r["ci_hi"] for r in pts], color=color,
-                           alpha=0.15, lw=0)
-        ax_shift.plot(x, [r["shift_median"] for r in pts], color=color, lw=2, marker="o", ms=5, zorder=3)
-        ax_shift.plot(x, [r["shift_p90"] for r in pts], color=color, lw=1, ls="--", zorder=3)
-    if static:
-        ax_ok.axhline(100 * static[0]["success"], color=INK_2, lw=0.8, ls=":")
-        ax_ok.annotate("cube held still", (min(r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0),
-                                           100 * static[0]["success"]), (0, -12), textcoords="offset points",
-                       color=INK_2, fontsize=8)
-    if ages:  # a straight-line move covers speed x (time since the look)
-        v = np.logspace(np.log10(min(r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0)),
-                        np.log10(max(r["speed_cm_s"] for r in rows)), 50)
-        age = float(np.median(ages))
-        ax_shift.plot(v, 10 * v * age, color=INK_2, lw=1, ls="-.", label=f"speed × look age ({age:.1f} s)")
-        leg = ax_shift.legend(frameon=False, fontsize=8, loc="upper left")
-        for text in leg.get_texts():
-            text.set_color(INK)
+    for variant in variants:
+        ls, lw, vlabel = VARIANT_STYLE[variant]
+        sel = [r for r in rows if r.get("variant", "once") == variant]
+        for motion in motions:
+            color = MOTION_STYLE[motion]
+            pts = sorted((r for r in sel if r["motion"] == motion), key=lambda r: r["speed_cm_s"])
+            x = [r["speed_cm_s"] for r in pts]
+            ax_ok.plot(x, [100 * r["success"] for r in pts], color=color, ls=ls, lw=lw, marker="o", ms=4, zorder=3)
+            if variant == variants[-1]:
+                ax_ok.fill_between(x, [100 * r["ci_lo"] for r in pts], [100 * r["ci_hi"] for r in pts], color=color,
+                                   alpha=0.12, lw=0)
+            ax_shift.plot(x, [r["shift_median"] for r in pts], color=color, ls=ls, lw=lw, marker="o", ms=4, zorder=3)
+        ages = [r["look_age_s"] for r in sel if r["speed_cm_s"] > 0]
+        if ages:  # a straight-line move covers speed x (time since the look)
+            v = np.array(sorted({r["speed_cm_s"] for r in sel if r["speed_cm_s"] > 0}))
+            age = float(np.median(ages))
+            ax_shift.plot(v, 10 * v * age, color=INK_2, ls=ls, lw=0.8, zorder=2)
+            ax_shift.annotate(f"speed × {age:.1f} s ({vlabel})", (v[-1], 10 * v[-1] * age), (-4, 4),
+                              textcoords="offset points", ha="right", color=INK_2, fontsize=8)
     speeds = sorted({r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0})
     for ax in (ax_ok, ax_shift):
         ax.set_xticks(speeds, [f"{v:g}" for v in speeds])
         ax.minorticks_off()
+        ax.set_xlabel("hand speed (cm/s)", color=INK_2)
     ax_ok.set_ylim(-5, 105)
-    ax_ok.set_xlabel("hand speed (cm/s)", color=INK_2)
     ax_ok.set_ylabel("success (%)", color=INK_2)
     ax_ok.set_title("Success", color=INK, fontsize=10, loc="left")
     ax_shift.set_yscale("log")
-    ax_shift.set_xlabel("hand speed (cm/s)", color=INK_2)
-    ax_shift.set_ylabel("cube distance from the aimed point\nwhen closing (mm; dashed = 90th pct)", color=INK_2,
+    ax_shift.set_ylabel("cube distance from the aimed point\nwhen the gripper closes (mm, median)", color=INK_2,
                         fontsize=9)
-    ax_shift.set_title("How far the cube moved since the look", color=INK, fontsize=10, loc="left")
-    leg = ax_ok.legend(frameon=False, fontsize=9, loc="lower left", title="hand motion")
-    leg.get_title().set_color(INK_2)
+    ax_shift.set_title("How far the cube moved since the last look", color=INK, fontsize=10, loc="left")
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color=MOTION_STYLE[mo], lw=2, label=mo) for mo in motions]
+    handles += [Line2D([], [], color=INK_2, ls=VARIANT_STYLE[va][0], lw=VARIANT_STYLE[va][1], label=VARIANT_STYLE[va][2])
+                for va in variants]
+    leg = ax_shift.legend(handles=handles, frameon=False, fontsize=8, loc="lower right")
     for text in leg.get_texts():
         text.set_color(INK)
     fig.tight_layout()

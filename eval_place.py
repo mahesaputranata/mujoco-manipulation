@@ -180,7 +180,8 @@ def setup_trial(trial, args):
     return model, data, dict(perceive=perceive, hooks=hooks, align=not baseline,
                              retries=0 if baseline else args.retries,
                              ik_restarts=0 if baseline else args.ik_restarts,
-                             arrive=not (baseline or args.no_arrive))
+                             arrive=not (baseline or args.no_arrive),
+                             look_again=args.look_again and not baseline)
 
 
 def controller_for(trial, args):
@@ -254,6 +255,8 @@ def default_tag(args):
         parts.append("randphys")
     if args.motion:
         parts.append(f"{args.motion}{args.speed:g}cms")
+    if args.look_again:
+        parts.append("lookagain")
     if args.perception == "camera":
         parts.append("camera")
         if args.calibration != "ideal":
@@ -385,6 +388,8 @@ def add_scenario_args(parser):
     parser.add_argument("--camera-rot", type=float, default=0.0, help="bump the real camera by this many degrees")
     parser.add_argument("--camera-shift", type=float, default=0.0, help="shift the real camera by this many mm")
     parser.add_argument("--focal-err", type=float, default=0.0, help="believed focal length off by this many %%")
+    parser.add_argument("--look-again", action="store_true",
+                        help="take a second look once the gripper is above the cube and re-plan the descent")
     parser.add_argument("--motion", choices=["static", "circle", "sway", "jitter"],
                         help="dynamic target: a hand holds the cube and moves it (hand_motion.py)")
     parser.add_argument("--speed", type=float, default=0.0, help="hand speed in cm/s (with --motion)")
