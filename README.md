@@ -19,27 +19,31 @@ Right: the improved system restarts IK, checks for collisions and completes the 
   the arm to arrive before closing the gripper.
 - Breaking point found: the system holds 99–100% up to 10 mm / 10° of perception error and
   degrades beyond that. Under noise, perception error dominates; the controller barely matters.
+- **The arm finds the cube with its own camera**: a fixed RGB camera replaces the simulator's
+  exact cube pose. Perception error 0.6 ± 0.4 mm and 0.0 ± 0.5°; 500/500 held-out trials succeed.
 - Continuous grasp measurements predicted *where* the original system would fail before any
   run actually failed.
 
 ## How the system works
 
 ```
-cube pose ──► planner ──► IK ──► smooth joint trajectory ──► joint PD + gravity comp ──► MuJoCo physics
-(sim or noisy)  waypoints   damped least squares   (smoothstep)       (Menagerie servos)
-                                    ▲                                                       │
-                                    └──────────── checks after each segment ◄───────────────┘
-                              (has the arm arrived? did the cube lift? still in hand?)
+RGB camera ──► perception ──► planner ──► IK ──► smooth trajectory ──► PD + gravity comp ──► MuJoCo physics
+ (fixed)      cube pose        waypoints   damped        (smoothstep)       (Menagerie servos)
+              (or: oracle)                 least squares
+                                  ▲                                                          │
+                                  └───────────── checks after each segment ◄─────────────────┘
+                            (has the arm arrived? did the cube lift? still in hand?)
 ```
 
 | Component | What it does |
 |---|---|
+| [`perception.py`](perception.py) | Fixed RGB camera → red-cube mask → top face → rays to the table → cube position, yaw and size |
 | [`ik.py`](ik.py) | Damped least-squares IK from scratch; multi-start with collision rejection |
 | [`demo_reach.py`](demo_reach.py) | Planner: grasp selection, IK waypoints, wait-to-arrive, segment checks, one re-grasp |
 | [`controllers.py`](controllers.py) | Joint PD (Menagerie servo) and PD + gravity compensation |
 | [`eval_place.py`](eval_place.py) | Randomized evaluation: success rate with 95% CI, failure types, margins, sweeps |
 | [`render_trials.py`](render_trials.py) | Replays any trial from its seed as a GIF (also side by side) |
-| [`plot_controllers.py`](plot_controllers.py) | Controller comparison and tracking figures |
+| [`plot_controllers.py`](plot_controllers.py), [`plot_perception.py`](plot_perception.py) | Controller and perception figures |
 | [`scene.py`](scene.py) | Builds the scene with `MjSpec`: UR5e + 2F-85 from MuJoCo Menagerie, cube, box |
 | [`tests/`](tests) | Unit, integration and regression tests (pytest), run by CI on every push |
 | [`fundamentals/`](fundamentals) | DH-parameter visualizers; FK/Jacobian/IK derivation drill in PyTorch |
@@ -137,6 +141,47 @@ What the measurements showed:
 
 ![controller comparison](results/controllers/comparison.png)
 
+## Perception: the arm finds the cube itself
+
+Until now the planner was told the cube's exact pose by the simulator (an "oracle"). Now a fixed
+RGB camera, like a webcam on a stand at a desk, sees the scene, and `perception.py` estimates the
+cube's pose from the image alone: `eval_place.py --perception camera`.
+
+![what the camera sees and what perception extracts](results/perception/camera_view.png)
+
+**The geometry is the hard part, not the detector.** A colour threshold finds the red cube. But a
+camera looking down at 45° also sees the cube's sides, so the centre of the red blob is not the
+centre of the cube: projected onto the table it is about 2 cm off. Instead:
+
+1. Find the **top face**, the brightest part of the blob (it is lit from above; Otsu's threshold).
+2. Cast rays from the camera through the outline of the top face and intersect them with the
+   plane of the cube's top.
+3. Fit a rectangle: centre → position, angle → yaw, width → size.
+4. The cube's height is not known in advance (random sizes), but a cube is as tall as it is
+   wide, so: assume a height, measure the width, use it as the new height, and repeat. It converges
+   in a few steps and estimates the size to within about 1 mm.
+
+| 100 trials (500 held out) | Oracle (exact pose) | Camera | Camera perception error |
+|---|---|---|---|
+| Default workspace | 100%, grasp 0.4 ± 0.2 mm | 100%, grasp 0.7 ± 0.4 mm | 0.4 ± 0.3 mm, 0.0 ± 0.4° |
+| + random cube physics | 100%, grasp 0.6 ± 0.2 mm | 100%, grasp 0.8 ± 0.4 mm | 0.4 ± 0.3 mm, 0.0 ± 0.4° |
+| Wide workspace | 100%, grasp 0.3 ± 0.2 mm | 100%, grasp 0.6 ± 0.4 mm | 0.5 ± 0.3 mm, 0.0 ± 0.3° |
+| **Held out: wide + physics, 500 trials** | | **500/500**, grasp 0.8 ± 0.5 mm | 0.6 ± 0.4 mm (max 2.2), 0.0 ± 0.5° |
+
+What the measurements taught:
+
+- **The edge of a mask is not where you think.** The outline was first pushed out by half a pixel
+  (right for hard-edged pixels). Measured on 40 rendered cubes, MuJoCo's anti-aliasing makes 0.25
+  pixel correct: the size bias went from +0.6 to +0.1 mm and the position error halved (1.3 → 0.6 mm).
+- **Frames cannot be trusted blindly.** Under parallel load, this laptop's OpenGL once returned a
+  wrong image (an estimate 77 cm from the cube) and, separately, aborted a worker process. The
+  camera now looks twice and accepts only plausible, consistent estimates (rejected frames are
+  counted), and the evaluation re-runs trials whose worker crashed instead of hanging.
+
+The simulated camera is close to ideal: perfect lighting, no lens distortion or sensor noise, and
+an exactly known camera pose. On real hardware, camera calibration error will dominate; the noise
+sweep above says the system needs it under about 10 mm / 10°.
+
 ## What failed, and the fixes
 
 Each fix came from replaying a specific failed trial, not from guessing.
@@ -161,13 +206,16 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (226 tests, ~20 s) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (243 tests, ~40 s) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
     are tested automatically), and a precision check for the final set-up;
   - *regression:* previously fixed failures stay fixed (trial 7: IK local minimum; trial 85: box
-    wall), a success floor in the hardest setting, and seed reproducibility.
+    wall), a success floor in the hardest setting, and seed reproducibility;
+  - *perception:* camera projection round trips, cube pose recovered from synthetic images with a
+    known answer, rendered-image accuracy, rejection of bad frames, and an end-to-end run with
+    the camera. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
 - **How well does the whole system work?** `eval_place.py`: scenario-based statistical evaluation
   (the results above).
 
@@ -190,7 +238,8 @@ This is still an idealized setup, and the limits are stated here on purpose:
   the arm still lags up to ~30 mm during fast moves (waiting hides this at the grasp, at a cost of
   0.6 s). The grasped cube's weight is not compensated. There is no motor model, latency, backlash
   or sensor noise.
-- **Perception:** ground truth plus Gaussian noise, read once per attempt.
+- **Perception:** a simulated, near-ideal camera; colour-based detection of one red cube. The pose
+  is estimated once per attempt, not tracked during the motion.
 - **Objects:** one rigid cube, always flat (only the yaw varies).
 - **No sim-to-real gap:** the simulated robot is the "real" robot.
 
@@ -205,6 +254,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python eval_place.py                                    # improved system, 100 trials
 .venv/bin/python eval_place.py --baseline                         # original system
 .venv/bin/python eval_place.py --workspace wide --pos-noise 5 --yaw-noise 5 --rand-physics
+.venv/bin/python eval_place.py --perception camera               # the arm finds the cube with its camera
 .venv/bin/python eval_place.py --controller pd --no-arrive        # improved planner, original control
 .venv/bin/python eval_place.py --yaw-sweep --pos-noise 5 --yaw-noise 5 --repeats 10 --sweep-step 3
 .venv/bin/python eval_place.py --baseline --workspace wide --replay 7   # replay one trial in 3D
@@ -221,7 +271,8 @@ vision-language-action (VLA) policy.
 
 - [x] Scene, damped least-squares IK from scratch, pick-and-place
 - [x] Randomized evaluation and robustness fixes
-- [x] Gravity compensation and wait-to-arrive; controller comparison (this page)
+- [x] Gravity compensation and wait-to-arrive; controller comparison
+- [x] Camera perception: fixed RGB camera, cube pose from the image (this page)
 - [ ] Computed-torque control (removes the motion lag), then operational-space / impedance
       control for contact-rich tasks (in progress)
 

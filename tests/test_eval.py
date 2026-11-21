@@ -50,3 +50,33 @@ def test_per_pose_aggregates_repeats():
     assert poses[0]["runs"] == 4 and poses[0]["ok_rate"] == 0.75
     assert poses[0]["outcomes"] == "GRASP_MISS:1 OK:3"
     assert poses[1]["ok_rate"] == 1.0
+
+
+def _crash_once(trial):
+    """Stands in for run_trial: the worker running trial 2 aborts the first time (module level so
+    the process pool can pickle it). The flag file marks that the crash happened."""
+    import os
+
+    import eval_place
+
+    flag = os.environ["CRASH_FLAG"]
+    if trial["trial"] == 2 and not os.path.exists(flag):
+        open(flag, "w").close()
+        os.abort()  # like the OpenGL driver abort
+    return eval_place.real_run_trial(trial)
+
+
+def test_run_all_survives_a_crashed_worker(tmp_path, monkeypatch):
+    """A worker dying in native code must not hang the evaluation: the lost trials are re-run
+    and every trial still returns a row, in order."""
+    import eval_place
+
+    flag = tmp_path / "crashed"
+    monkeypatch.setenv("CRASH_FLAG", str(flag))
+    monkeypatch.setattr(eval_place, "real_run_trial", eval_place.run_trial, raising=False)
+    monkeypatch.setattr(eval_place, "run_trial", _crash_once)  # forked workers inherit this
+    args = scenario_args()
+    args.workers = 3
+    rows = eval_place.run_all([sample_trial(i, args) for i in range(4)], args)
+    assert flag.exists()  # the crash really happened
+    assert [r["trial"] for r in rows] == [0, 1, 2, 3]

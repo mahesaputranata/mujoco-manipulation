@@ -24,7 +24,8 @@ demo_reach.pick_and_place); the summary prints their mean +- std.
 """
 import argparse
 import csv
-import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 import os
 import time
 from collections import Counter
@@ -33,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from controllers import CONTROLLERS
-from demo_reach import METRICS, OUTCOMES, ground_truth, make_stepper, pick_and_place, run_in_viewer
+from demo_reach import METRICS, OUTCOMES, ground_truth, make_stepper, pick_and_place, run_in_viewer, wrap_cube_angle
 from scene import BOX_POS, CUBE_HALF, CUBE_MASS, build_model, cube_yaw, place_cube
 
 ROOT = Path(__file__).parent
@@ -69,13 +70,54 @@ def sample_trial(i, args, repeat=0):
     return trial
 
 
-def noisy_perception(args, rng):
-    """Like ground_truth, plus Gaussian error on x, y and yaw: a stand-in for a real camera."""
-    def perceive(data):
-        pos, yaw = ground_truth(data)
-        pos[:2] += rng.normal(0, args.pos_noise / 1000, 2)
-        return pos, yaw + rng.normal(0, np.radians(args.yaw_noise))
-    return perceive
+PERCEPTION_METRICS = ["perc_pos_err_mm", "perc_yaw_err_deg", "perc_z_err_mm", "perc_glitches"]
+
+
+class Perceiver:
+    """The planner's eyes for one trial: the oracle or the camera, plus optional Gaussian noise.
+
+    oracle: the simulator's exact cube pose (what the planner used before perception existed).
+    camera: perception.CameraPerception, estimated from the fixed RGB camera's image.
+    --pos-noise / --yaw-noise add error on top of either.
+
+    For the trial's first look it also logs how far the estimate is from the truth, so perception
+    accuracy is measured on every trial, for the oracle-with-noise and the camera alike.
+    """
+
+    def __init__(self, model, args, rng):
+        self.args, self.rng = args, rng
+        self.camera = None
+        if args.perception == "camera":
+            from perception import CameraPerception  # needs OpenCV and an OpenGL context
+            self.camera = CameraPerception(model)
+        self.first = None
+
+    def __call__(self, data):
+        if self.camera is not None:
+            seen = self.camera(data)
+            if seen is None:
+                return None
+            pos, yaw = seen
+        else:
+            pos, yaw = ground_truth(data)
+        pos = pos.copy()
+        pos[:2] += self.rng.normal(0, self.args.pos_noise / 1000, 2)
+        yaw = yaw + self.rng.normal(0, np.radians(self.args.yaw_noise))
+        if self.first is None:
+            true_pos, true_yaw = ground_truth(data)
+            self.first = dict(perc_pos_err_mm=1000 * np.linalg.norm(pos[:2] - true_pos[:2]),
+                              perc_yaw_err_deg=np.degrees(wrap_cube_angle(yaw - true_yaw)),
+                              perc_z_err_mm=1000 * (pos[2] - true_pos[2]))
+        return pos, yaw
+
+    def metrics(self):
+        m = dict(self.first or {k: np.nan for k in PERCEPTION_METRICS})
+        m["perc_glitches"] = self.camera.glitches if self.camera is not None else np.nan
+        return m
+
+    def close(self):
+        if self.camera is not None:
+            self.camera.close()
 
 
 def setup_trial(trial, args):
@@ -84,7 +126,7 @@ def setup_trial(trial, args):
     place_cube(model, data, (trial["x"], trial["y"]), np.radians(trial["yaw_deg"]))
     rng = np.random.default_rng(trial["noise_seed"])
     baseline = trial.get("baseline", args.baseline)  # the yaw sweep runs both planners in one go
-    return model, data, dict(perceive=noisy_perception(args, rng), align=not baseline,
+    return model, data, dict(perceive=Perceiver(model, args, rng), align=not baseline,
                              retries=0 if baseline else args.retries,
                              ik_restarts=0 if baseline else args.ik_restarts,
                              arrive=not (baseline or args.no_arrive))
@@ -109,10 +151,41 @@ def run_trial(trial):
     t0 = time.perf_counter()
     metrics = {}
     step = make_stepper(model, data, controller=controller_for(trial, _worker["args"]))
-    outcome, attempts = pick_and_place(model, data, step, metrics=metrics, **kwargs)
+    try:
+        outcome, attempts = pick_and_place(model, data, step, metrics=metrics, **kwargs)
+    finally:
+        kwargs["perceive"].close()  # free the camera's OpenGL context: one per trial would leak
+    metrics.update(kwargs["perceive"].metrics())
     return {**trial, "outcome": outcome, "attempts": attempts, **metrics, "seconds": time.perf_counter() - t0,
             "final_x": data.body("cube").xpos[0], "final_y": data.body("cube").xpos[1],
             "final_yaw_deg": np.degrees(cube_yaw(data))}
+
+
+def run_all(trials, args, rounds=3):
+    """Run trials in parallel worker processes and return their rows in the original order.
+
+    A worker process can die in native code (camera rendering has aborted inside the OpenGL
+    driver on a laptop under load). multiprocessing.Pool then waits forever for the lost result;
+    ProcessPoolExecutor reports it instead. The unfinished trials are re-run in a fresh pool, up
+    to `rounds` times, and the number of crashed pools is reported rather than hidden.
+    """
+    rows, todo, crashes = {}, list(range(len(trials))), 0
+    for _ in range(rounds):
+        try:
+            with ProcessPoolExecutor(args.workers, initializer=_init_worker, initargs=(args,)) as pool:
+                futures = {pool.submit(run_trial, trials[i]): i for i in todo}
+                for fut in as_completed(futures):
+                    rows[futures[fut]] = fut.result()
+        except BrokenProcessPool:
+            crashes += 1
+        todo = [i for i in range(len(trials)) if i not in rows]
+        if not todo:
+            break
+    if todo:
+        raise RuntimeError(f"{len(todo)} trials never finished after {crashes} worker crashes")
+    if crashes:
+        print(f"  note: {crashes} worker crash(es); their unfinished trials were re-run")
+    return [rows[i] for i in range(len(trials))]
 
 
 def default_tag(args):
@@ -125,6 +198,8 @@ def default_tag(args):
         parts.append(f"noise{args.pos_noise:g}mm{args.yaw_noise:g}deg")
     if args.rand_physics:
         parts.append("randphys")
+    if args.perception == "camera":
+        parts.append("camera")
     return "_".join(parts)
 
 
@@ -177,7 +252,7 @@ def print_summary(rows, tag, wall):
             ids = [r["trial"] if not r["repeat"] else f'{r["trial"]}.{r["repeat"]}' for r in rows if r["outcome"] == o]
             shown = ", ".join(map(str, ids[:12])) + (" ..." if len(ids) > 12 else "")
             print(f"  {o:<11} {counts[o]:>4}" + ("" if o == "OK" else f"   trials: {shown}"))
-    for k in METRICS:
+    for k in METRICS + PERCEPTION_METRICS:
         v = np.array([r[k] for r in rows], dtype=float)
         v = v[~np.isnan(v)]
         if len(v):
@@ -219,6 +294,8 @@ def add_scenario_args(parser):
     parser.add_argument("--pos-noise", type=float, default=0.0, help="perception noise, std dev in mm")
     parser.add_argument("--yaw-noise", type=float, default=0.0, help="perception noise, std dev in deg")
     parser.add_argument("--rand-physics", action="store_true", help="random cube size, mass and friction")
+    parser.add_argument("--perception", choices=["oracle", "camera"], default="oracle",
+                        help="where the cube pose comes from: the simulator, or the fixed RGB camera")
     parser.add_argument("--controller", choices=CONTROLLERS,
                         help="arm controller for the improved planner (default pd_gravity; --baseline always uses pd)")
     parser.add_argument("--no-arrive", action="store_true",
@@ -256,8 +333,7 @@ def main():
         tag = args.tag or default_tag(args) + (f"_x{args.repeats}" if args.repeats > 1 else "")
         trials = [sample_trial(i, args, r) for i in range(args.trials) for r in range(args.repeats)]
     t0 = time.perf_counter()
-    with mp.Pool(args.workers, initializer=_init_worker, initargs=(args,)) as pool:
-        rows = pool.map(run_trial, trials)
+    rows = run_all(trials, args)
     wall = time.perf_counter() - t0
 
     out = ROOT / "results" / tag

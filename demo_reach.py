@@ -31,7 +31,7 @@ ARRIVE_TOL = 0.002           # m: TCP this close to its target counts as arrived
 STILL_SPEED = 0.005          # m/s: TCP slower than this has stopped; waiting longer won't help
 ARRIVE_TIMEOUT = 1.5         # s
 
-OUTCOMES = ["OK", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
+OUTCOMES = ["OK", "NOT_SEEN", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
 
 
 def grasp_quat(psi):
@@ -179,7 +179,7 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
-    `perceive(data)` returns the cube (position, yaw) that the planner sees.
+    `perceive(data)` returns the cube (position, yaw) that the planner sees, or None if it can't see it.
 
     Pass a dict as `metrics` to also get continuous measurements (NaN when not reached).
     Pass/fail hides how close a run came to failing; these show the margin:
@@ -203,7 +203,11 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
     def wait(q_target, grip):
         m["wait_s"] += wait_until_arrived(model, data, step, q_target, grip, scratch)
     for attempt in range(1, retries + 2):
-        cube_pos, yaw = perceive(data)
+        seen = perceive(data)
+        if seen is None:  # camera perception: cube occluded or out of view
+            say(f"attempt {attempt}: cube not seen")
+            return "NOT_SEEN", attempt
+        cube_pos, yaw = seen
         plan, ik_ok, quat = make_plan(model, data, cube_pos, yaw, align, ik_restarts, log)
         if not ik_ok:
             return "IK_FAIL", attempt

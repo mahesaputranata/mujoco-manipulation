@@ -26,6 +26,26 @@ CUBE_MASS = 0.1
 CUBE_START = (0.45, 0.20, CUBE_HALF)
 BOX_POS = (0.40, -0.30, 0.0)
 
+# Fixed "tripod" camera in front of the table, looking down at the workspace at about 45 deg,
+# like a webcam on a stand at a desk (eye-to-hand). Used by perception.py.
+SCENE_CAMERA = "scene_cam"
+CAMERA_EYE = (0.98, 0.15, 0.72)
+CAMERA_TARGET = (0.40, 0.15, 0.0)
+CAMERA_FOVY = 55.0  # vertical field of view, degrees
+
+
+def look_at_xyaxes(eye, target, up=(0.0, 0.0, 1.0)):
+    """MuJoCo camera orientation (x and y axes in world frame) for a camera at `eye` looking at `target`.
+
+    A MuJoCo camera looks along its -z axis, with x to the right of the image and y up.
+    """
+    forward = np.asarray(target, float) - np.asarray(eye, float)
+    z = -forward / np.linalg.norm(forward)
+    x = np.cross(up, z)
+    x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    return [*x, *y]
+
 
 def _add_open_box(world, name, pos, inner=0.14, wall=0.01, height=0.06):
     """An open-top box made of 5 thin slabs, so objects can be dropped into it."""
@@ -75,6 +95,8 @@ def build_spec(cube_half=CUBE_HALF, cube_mass=CUBE_MASS, cube_friction=1.0) -> m
                   rgba=[0.85, 0.15, 0.15, 1], mass=cube_mass, friction=[cube_friction, 0.005, 0.0001])
 
     _add_open_box(world, "box", BOX_POS)
+    world.add_camera(name=SCENE_CAMERA, pos=CAMERA_EYE, fovy=CAMERA_FOVY,
+                     xyaxes=look_at_xyaxes(CAMERA_EYE, CAMERA_TARGET))
     return arm
 
 

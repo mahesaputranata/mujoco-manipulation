@@ -23,6 +23,7 @@ STYLE = {
     "GRASP_MISS": ("#ec835a", "^"),
     "DROPPED": ("#c98500", "s"),
     "MISSED_BOX": ("#4a3aa7", "D"),
+    "NOT_SEEN": ("#52514e", "P"),
 }
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 

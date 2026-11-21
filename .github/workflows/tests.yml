@@ -21,8 +21,15 @@ jobs:
           git -C third_party/menagerie sparse-checkout set universal_robots_ur5e robotiq_2f85
           git -C third_party/menagerie checkout cda5236f98383f6fbaa4820c6b18dba892cd087f
 
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+      - name: Install dependencies (and OSMesa, a software OpenGL renderer for the camera tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libosmesa6
+          pip install -r requirements-dev.txt
 
       - name: Run tests
+        env:
+          MUJOCO_GL: osmesa
+          PYOPENGL_PLATFORM: osmesa
+          REQUIRE_GL: "1"  # camera tests must run here, not skip
         run: pytest -q
