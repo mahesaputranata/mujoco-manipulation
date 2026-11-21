@@ -5,6 +5,7 @@ while the improved system (camera perception, gravity-compensated control) picks
 variants, each compared on the same trials:
     once    looks once per attempt, then moves blindly (the baseline)
     again   looks again once the gripper is above the cube and re-plans the descent (Option A)
+    track   watches the cube every frame of the descent and the grasp (Option B, visual servoing)
 
     python dynamic_sweep.py            # run missing settings (resumable), then summarize and plot
     python dynamic_sweep.py --plot     # only summarize and plot existing results
@@ -25,7 +26,7 @@ TRIALS = 100
 MOTIONS = ["circle", "sway", "jitter"]
 SPEEDS = [0.25, 0.5, 1, 2, 5, 10]  # cm/s
 TOLERANCE = 0.95
-VARIANTS = {"once": [], "again": ["--look-again"]}  # planner variant -> extra eval_place.py flags
+VARIANTS = {"once": [], "again": ["--look-again"], "track": ["--track"]}  # variant -> extra flags
 
 
 def settings():

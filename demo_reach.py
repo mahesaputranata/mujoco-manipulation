@@ -217,7 +217,7 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
     Returns the gripper turn used, so the rest of the plan can continue at the same wrist angle.
     """
     say = say or (lambda msg: None)
-    look = getattr(perceive, "quick", perceive)  # one image per frame, no double check
+    quick = getattr(perceive, "quick", None)  # one image per frame, tracking from the last estimate
     steps_per_frame = max(1, round(1 / (hz * model.opt.timestep)))
     est_pos, est_yaw = np.array(cube_pos, float), yaw
     psi = grasp_angles(est_yaw, align)[0] if psi is None else psi  # the plan's wrist angle
@@ -226,7 +226,7 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
     last_seen, lost, start, closing_since, at_height_since = data.time, 0, data.time, None, None
     lag = []
     while True:
-        seen = look(data)
+        seen = quick(data, guess=(est_pos, est_yaw)) if quick else perceive(data)
         dt = data.time - last_seen
         if seen is not None and np.linalg.norm(seen[0][:2] - est_pos[:2]) <= MAX_SPEED * dt + 0.01:
             est_pos, est_yaw, last_seen = np.array(seen[0], float), seen[1], data.time

@@ -146,23 +146,28 @@ class Perceiver:
                                   calib_rot_err_deg=np.degrees(np.arccos(cos)), tags_seen=self.camera.tags)
         return pos, yaw
 
-    def quick(self, data):
-        """One look, no double check: for tracking, many frames per second (demo_reach.track_descent).
+    def quick(self, data, guess=None):
+        """One look per frame, for tracking (demo_reach.track_descent), many frames per second.
 
-        Close to the grasp the gripper's fingers hide part of the cube's top face. A partly hidden
-        face still looks red and cube-like, but its centre is off (by 34 mm in one logged descent),
-        so the tracker would steer to the wrong spot. It also looks smaller and no longer square:
-        frames whose size differs from the last full look by more than 1.5 mm, or whose top face
-        is not square, are rejected.
+        Close to the grasp the gripper's shadow darkens the cube's top face (the light shines straight
+        down), and its fingers can hide part of it. The top-face method then fails: 40+ mm off. So
+        tracking frames fit a cube of the size measured in the last full look to the whole red
+        silhouette instead (perception.fit_silhouette), starting from the previous frame's estimate
+        `guess` = (position, yaw). Without a guess or a full look yet, it falls back to the top face.
         """
         if self.camera is None:
             return self(data)
-        from perception import plausible
-        est = self.camera.look(data)
-        if not plausible(est) or est["aspect"] < 0.9:
-            return None
+        from perception import fit_silhouette, plausible
         reference = self.camera.last
-        if reference is not None and abs(est["half"] - reference["half"]) > 0.0015:
+        if guess is not None and reference is not None:
+            rgb = self.camera.image(data)
+            camera = self.camera.camera_belief(rgb, data)
+            est = None if camera is None else fit_silhouette(rgb, camera, guess[0], guess[1], reference["half"])
+        else:
+            est = self.camera.look(data)
+            if not plausible(est) or est["aspect"] < 0.9:
+                return None
+        if est is None:
             return None
         pos = est["pos"].copy()
         pos[:2] += self.rng.normal(0, self.args.pos_noise / 1000, 2)

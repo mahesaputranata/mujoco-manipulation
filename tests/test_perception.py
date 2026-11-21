@@ -12,7 +12,8 @@ import pytest
 
 from conftest import scenario_args
 from demo_reach import wrap_cube_angle
-from perception import CameraPerception, PinholeCamera, estimate_from_image, largest_blob, red_mask
+from perception import (CameraPerception, PinholeCamera, cube_corners, estimate_from_image, largest_blob,
+                        red_mask)
 from scene import CAMERA_TARGET, build_model, look_at_xyaxes, place_cube
 
 BRIGHT_RED, DARK_RED, FLOOR = (220, 40, 40), (120, 20, 20), (40, 60, 90)
@@ -22,14 +23,6 @@ BRIGHT_RED, DARK_RED, FLOOR = (220, 40, 40), (120, 20, 20), (40, 60, 90)
 def camera():
     model, data = build_model()
     return PinholeCamera(model, data)
-
-
-def cube_corners(x, y, yaw, half):
-    """The 8 corners of a cube resting on the table: 4 bottom, then 4 top."""
-    c, s = np.cos(yaw), np.sin(yaw)
-    square = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]]) * half
-    xy = square @ np.array([[c, s], [-s, c]]) + [x, y]
-    return np.vstack([np.c_[xy, np.zeros(4)], np.c_[xy, np.full(4, 2 * half)]])
 
 
 def synthetic_image(camera, x, y, yaw, half, ss=4):
@@ -237,3 +230,45 @@ def test_bumped_camera_stale_vs_marker(gl, calibration, max_err_mm, min_err_mm):
         kwargs["perceive"].close()
     err = 1000 * np.linalg.norm(seen[0][:2] - data.body("cube").xpos[:2])
     assert min_err_mm <= err < max_err_mm
+
+
+# --- tracking: silhouette fit (robust to the gripper's shadow) ------------------------------------
+
+def shadowed_image(camera, x, y, yaw, half, finger=False):
+    """A synthetic cube whose top face lies in shadow (as under the descending gripper), optionally
+    with a dark 'finger' covering part of it."""
+    img = synthetic_image(camera, x, y, yaw, half)
+    top = camera.project(cube_corners(x, y, yaw, half))[4:]
+    cv2.fillConvexPoly(img, np.round(top - 0.5).astype(np.int32), (90, 15, 15))
+    if finger:
+        c = top.mean(axis=0).astype(int)
+        cv2.rectangle(img, (c[0] - 4, c[1] - 30), (c[0] + 3, c[1] + 2), (20, 20, 20), -1)
+    return img
+
+
+@pytest.mark.parametrize("finger", [False, True])
+@pytest.mark.parametrize("x,y,yaw_deg,half", [(0.45, 0.20, 30, 0.025), (0.35, 0.05, -10, 0.022)])
+def test_silhouette_fit_survives_the_shadow(camera, x, y, yaw_deg, half, finger):
+    """With the top face in shadow the top-face method is centimetres off; the silhouette fit,
+    started from a guess 15 mm and 6 deg away, finds the cube within ~2 mm."""
+    from perception import fit_silhouette
+
+    img = shadowed_image(camera, x, y, np.radians(yaw_deg), half, finger)
+    old = estimate_from_image(img, camera)
+    assert old is None or np.linalg.norm(old["pos"][:2] - [x, y]) > 0.02  # the old method is fooled
+    est = fit_silhouette(img, camera, [x + 0.012, y - 0.009], np.radians(yaw_deg + 6), half)
+    assert est is not None
+    assert np.linalg.norm(est["pos"][:2] - [x, y]) < 0.0025
+    # Yaw is the least precise part: a small turn moves only a few outline pixels. A few degrees
+    # are harmless for a parallel gripper.
+    assert abs(np.degrees(wrap_cube_angle(est["yaw"] - np.radians(yaw_deg)))) < 4.0
+
+
+def test_silhouette_fit_rejects_a_mostly_hidden_cube(camera):
+    from perception import fit_silhouette
+
+    img = synthetic_image(camera, 0.45, 0.20, 0.3, 0.025)
+    v, u = np.nonzero(red_mask(img))
+    img[v.min():v.max() + 1, u.min():(u.min() + u.max()) // 2 + 6] = (20, 20, 20)  # cover over half
+    img[v.min():v.max() + 1, (u.min() + u.max()) // 2 + 6:u.max() + 1:2] = (20, 20, 20)
+    assert fit_silhouette(img, camera, [0.45, 0.20], 0.3, 0.025) is None

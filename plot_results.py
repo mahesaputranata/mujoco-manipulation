@@ -182,12 +182,13 @@ def plot_calibration(rows, sweeps, path):
 MOTION_STYLE = {"circle": "#2a78d6", "sway": "#eb6834", "jitter": "#1baf7a"}  # palette slots 1-3
 
 
-VARIANT_STYLE = {"once": ("--", 1.2, "looks once"), "again": ("-", 2.2, "looks again above the cube")}
+VARIANT_STYLE = {"once": (":", 1.2, "looks once"), "again": ("--", 1.4, "looks again above the cube"),
+                 "track": ("-", 2.4, "tracks the cube (every frame)")}
 
 
 def plot_dynamic(rows, motions, path, variants=("once",)):
     """Dynamic targets: success rate and target shift vs hand speed. Colour = hand motion,
-    line style = planner variant (dashed: looks once; solid: looks again above the cube)."""
+    line style = planner variant (dotted: looks once; dashed: looks again; solid: tracks)."""
     variants = list(variants)
     fig, (ax_ok, ax_shift) = plt.subplots(1, 2, figsize=(11.5, 4.6))
     fig.patch.set_facecolor(SURFACE)

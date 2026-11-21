@@ -186,6 +186,79 @@ def estimate_from_image(rgb, camera, iterations=6):
                 pixels=int(blob.sum()))
 
 
+# --- tracking: fit a cube of known size to the whole red silhouette ---------------------------
+
+def cube_corners(x, y, yaw, half):
+    """The 8 corners of a cube resting on the table (4 bottom, then 4 top), centre (x, y), turned yaw."""
+    c, s = np.cos(yaw), np.sin(yaw)
+    square = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]]) * half
+    xy = square @ np.array([[c, s], [-s, c]]) + [x, y]
+    return np.vstack([np.c_[xy, np.zeros(4)], np.c_[xy, np.full(4, 2 * half)]])
+
+
+SUB = 8  # sub-pixel precision for drawing outlines (fixed point with 3 fractional bits)
+
+
+# Measured while tracking a jittering cube (296 frames): fits with under 30% of the cube visible were
+# 43 mm off (median); 30-40%: 4.8 mm but 17 mm at the 90th percentile; 40-50%: 2.2 mm; above: 1-6 mm.
+# (A shadowed top face is partly darker than the red threshold, so even a fully seen cube is not 100%.)
+MIN_VISIBLE = 0.4
+
+
+def fit_silhouette(rgb, camera, guess_pos, guess_yaw, half, min_coverage=0.85, min_visible=MIN_VISIBLE):
+    """Cube pose from the whole red silhouette, given its size: robust to shadows on the top face.
+
+    While tracking, the gripper's shadow darkens the cube's top face, so "brightest part = top face"
+    (estimate_from_image) fails. The silhouette (top and sides together) is still red, and for a
+    cube of known size resting on the table it is fixed by (x, y, yaw). Search those three, starting
+    from the previous estimate, for the projected outline that best matches the red pixels. Red
+    pixels outside the outline cost a lot; outline pixels that are not red cost little, since a
+    finger may cover part of the cube. Returns an estimate dict, or None if the fit explains less
+    than min_coverage of the red pixels, or less than min_visible of the fitted cube is red (most of
+    it hidden: the remaining red pixels are then all "explained", but no longer pin the pose down).
+    Yaw is the least precise part (a few degrees): a small turn moves only a few outline pixels.
+    """
+    mask = largest_blob(red_mask(rgb))
+    if mask.sum() < MIN_PIXELS:
+        return None
+    vs, us = np.nonzero(mask)
+    pad = 20
+    u0, v0 = max(us.min() - pad, 0), max(vs.min() - pad, 0)
+    crop = mask[v0:vs.max() + pad, u0:us.max() + pad]
+    n_red = crop.sum()
+    canvas = np.zeros(crop.shape, np.uint8)
+
+    def score(p):
+        canvas[:] = 0
+        px = camera.project(cube_corners(p[0], p[1], p[2], half)) - [u0 + 0.5, v0 + 0.5]
+        hull = cv2.convexHull(np.round(px * SUB).astype(np.int32))
+        cv2.fillConvexPoly(canvas, hull, 1, lineType=cv2.LINE_8, shift=3)
+        model = canvas.astype(bool)
+        inside, area = np.count_nonzero(model & crop), np.count_nonzero(model)
+        return inside - 3.0 * (n_red - inside) - 0.3 * (area - inside), (inside, area)
+
+    best = np.array([guess_pos[0], guess_pos[1], guess_yaw], float)
+    best_score, best_counts = score(best)
+    steps = np.array([0.006, 0.006, np.radians(6.0)])  # x, y in m; yaw in rad
+    while steps[0] > 0.00025:
+        improved = False
+        for k in range(3):
+            for sign in (1.0, -1.0):
+                trial = best.copy()
+                trial[k] += sign * steps[k]
+                sc, counts = score(trial)
+                if sc > best_score:
+                    best, best_score, best_counts, improved = trial, sc, counts, True
+        if not improved:
+            steps /= 2
+    inside, area = best_counts
+    coverage, visible = inside / max(n_red, 1), inside / max(area, 1)
+    if coverage < min_coverage or visible < min_visible:
+        return None
+    return dict(pos=np.array([best[0], best[1], half]), yaw=best[2], half=half, aspect=1.0,
+                coverage=coverage, visible=visible, pixels=int(n_red))
+
+
 def plausible(est):
     return est is not None and HALF_RANGE[0] <= est["half"] <= HALF_RANGE[1]
 

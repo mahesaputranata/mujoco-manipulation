@@ -95,3 +95,14 @@ def test_look_again_catches_what_look_once_misses():
 def test_look_again_with_a_still_cube():
     row = run(3, "--perception", "camera", "--look-again")
     assert row["outcome"] == "OK" and row["relook_seen"] == 1 and row["relook_shift_mm"] < 3
+
+
+def test_tracking_catches_a_cube_that_look_again_misses():
+    """Option B: watching the cube every frame of the descent catches a cube circling at 2 cm/s,
+    which both look-once and look-again miss (0/100 in dynamic_sweep.py)."""
+    args = ("--motion", "circle", "--speed", "2", "--perception", "camera")
+    assert run(0, *args, "--look-again")["outcome"] == "GRASP_MISS"
+    row = run(0, *args, "--track")
+    assert row["outcome"] == "OK"
+    assert row["target_shift_mm"] < 12  # aimed at where the cube is, not where it was
+    assert row["frames_lost"] <= 5  # the silhouette fit keeps seeing it under the gripper's shadow
