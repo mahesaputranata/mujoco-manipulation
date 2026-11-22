@@ -16,6 +16,8 @@
     "focal_err": 0.0,
     "look_again": false,
     "track": true,
+    "predict": 0.0,
+    "predict_v2": false,
     "motion": "sway",
     "speed": 10.0,
     "controller": null,
@@ -33,10 +35,10 @@
     ],
     "sweep_step": 1.0
   },
-  "git_commit": "51456dbfb388a75dc267eded80d8bce9f82d0b1e",
+  "git_commit": "6112f0014b4a53e1ea55d4743b35c882879db91c",
   "git_dirty": false,
-  "created": "2026-11-21T23:16:50+00:00",
-  "wall_seconds": 231.7,
+  "created": "2026-11-22T12:28:53+00:00",
+  "wall_seconds": 216.0,
   "versions": {
     "python": "3.10.12",
     "mujoco": "3.17.0",

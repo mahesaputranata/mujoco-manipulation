@@ -17,6 +17,7 @@
     "look_again": false,
     "track": true,
     "predict": 0.2,
+    "predict_v2": false,
     "motion": "sway",
     "speed": 5.0,
     "controller": null,
@@ -34,10 +35,10 @@
     ],
     "sweep_step": 1.0
   },
-  "git_commit": "f52db30ca2c2f2493ad328214ee80fe3b6703d44",
+  "git_commit": "6112f0014b4a53e1ea55d4743b35c882879db91c",
   "git_dirty": false,
-  "created": "2026-11-22T01:25:58+00:00",
-  "wall_seconds": 171.7,
+  "created": "2026-11-22T13:20:46+00:00",
+  "wall_seconds": 174.8,
   "versions": {
     "python": "3.10.12",
     "mujoco": "3.17.0",

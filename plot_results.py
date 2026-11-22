@@ -183,8 +183,8 @@ MOTION_STYLE = {"circle": "#2a78d6", "sway": "#eb6834", "jitter": "#1baf7a"}  # 
 
 
 VARIANT_STYLE = {"once": (":", 1.2, "looks once"), "again": ("--", 1.4, "looks again above the cube"),
-                 "track": ("-.", 1.8, "tracks the cube"), "predict": ((0, (5, 1, 1, 1)), 1.8, "predicts (v1)"),
-                 "predict2": ("-", 2.6, "predicts (v2)")}
+                 "track": ("-.", 1.8, "tracks the cube"), "predict": ("-", 2.6, "tracks + predicts (v1)"),
+                 "predict2": ((0, (5, 1, 1, 1)), 1.8, "tracks + predicts (v2)")}
 
 
 def plot_dynamic(rows, motions, path, variants=("once",), title=None):

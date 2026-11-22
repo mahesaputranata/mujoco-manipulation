@@ -21,6 +21,8 @@ Right: the improved system restarts IK, checks for collisions and completes the 
   degrades beyond that. Under noise, perception error dominates; the controller barely matters.
 - **The arm finds the cube with its own camera**: a fixed RGB camera replaces the simulator's
   exact cube pose. Perception error 0.6 ± 0.4 mm and 0.0 ± 0.5°; 500/500 held-out trials succeed.
+- **It catches a moving cube**: tracking with a Kalman prediction keeps ≥ 95% success with a hand
+  moving the cube at up to 10 cm/s (the fastest tested). Looking once, it managed only 0.5 cm/s.
 - Continuous grasp measurements predicted *where* the original system would fail before any
   run actually failed.
 
@@ -45,6 +47,7 @@ RGB camera ──► perception ──► planner ──► IK ──► smooth 
 | [`render_trials.py`](render_trials.py) | Replays any trial from its seed as a GIF (also side by side) |
 | [`hand_motion.py`](hand_motion.py), [`dynamic_sweep.py`](dynamic_sweep.py) | Dynamic targets: a hand moves the cube; success vs hand speed |
 | [`predict.py`](predict.py) | Constant-velocity Kalman filter: where the moving cube will be |
+| [`visibility_map.py`](visibility_map.py) | Segmentation renders: how much of the cube the camera sees, and what hides it |
 | [`calib_sweep.py`](calib_sweep.py) | Camera calibration experiment: knocked camera, stale belief vs self-locating from ArUco tags |
 | [`plot_controllers.py`](plot_controllers.py), [`plot_perception.py`](plot_perception.py) | Controller and perception figures |
 | [`scene.py`](scene.py) | Builds the scene with `MjSpec`: UR5e + 2F-85 from MuJoCo Menagerie, cube, box |
@@ -235,17 +238,27 @@ trials each, with camera perception: `dynamic_sweep.py`.
 
 ![success and cube travel vs hand speed](results/dynamic/dynamic.png)
 
+*Middle panel: with prediction the gripper deliberately aims where the cube will be 0.2 s later,
+not where it is, so its distance from the cube at closing is larger than with tracking alone (and
+the arm's lag, right, smaller).*
+
 | Hand speed (cm/s) | 0.25 | 0.5 | 1 | 2 | 5 | 10 |
 |---|---|---|---|---|---|---|
 | circle, looks once | 100% | 100% | 0% | 0% | 11% | 8% |
 | circle, looks again | 100% | 100% | 99% | 0% | 0% | 1% |
-| circle, **tracks** | 100% | 100% | 100% | **100%** | **92%** | **59%** |
+| circle, tracks | 100% | 100% | 100% | 100% | 97% | 69% |
+| circle, **tracks + predicts** | 98% | 100% | 100% | 99% | **96%** | **96%** |
 | sway, looks once | 100% | 100% | 0% | 24% | 85% | 90% |
 | sway, looks again | 100% | 100% | 100% | 100% | 76% | 94% |
-| sway, **tracks** | 100% | 100% | 100% | 100% | 81% | 88% |
+| sway, tracks | 100% | 100% | 100% | 100% | 96% | 95% |
+| sway, **tracks + predicts** | 99% | 100% | 100% | 100% | **100%** | **96%** |
 | jitter, looks once | 100% | 100% | 100% | 100% | 89% | 49% |
 | jitter, looks again | 100% | 100% | 100% | 100% | 95% | 62% |
-| jitter, **tracks** | 100% | 100% | 100% | 100% | **97%** | **92%** |
+| jitter, tracks | 100% | 100% | 100% | 100% | 99% | 96% |
+| jitter, **tracks + predicts** | 98% | 98% | 99% | 100% | **100%** | **96%** |
+
+Fastest speed with ≥ 95% success (all slower speeds too): looks once 0.5–2 cm/s, looks again
+1–5, tracks 5–10, **tracks + predicts 10 cm/s for all three motions** (the fastest tested).
 
 What the measurements showed:
 
@@ -281,13 +294,23 @@ first, both found by logging what the camera saw frame by frame:
   41–47 mm off. Tracking frames therefore fit a cube of the size measured in the first look to the
   **whole red silhouette** (`perception.fit_silhouette`): shadowed or partly covered, within ~1 mm.
 - **Partly hidden cubes.** Fits are only trusted if at least 40% of the cube is visible. Measured
-  on 296 tracking frames: under 30% visible was 43 mm off (median), 40–50% was 2.2 mm.
+  on 296 tracking frames: under 30% visible was 43 mm off (median), 40–50% was 2.2 mm. (This
+  threshold depends on lighting: under CI's software renderer the shadowed cube is darker, so
+  fewer of its pixels pass the red test. A real camera will need it re-measured.)
+- **Losing the cube, though the camera could see it.** Trials that lost 40+ frames failed 59% of
+  the time, so I first assumed the arm blocked the camera's view. A segmentation render on every
+  frame (`visibility_map.py`: 100 still-cube positions and rotations) showed it never does: the
+  cube stays at least 40% visible at every gripper height, and only at the grasp do the fingers
+  cover ~17% of it. The real cause was a **tracking-loss cascade**: the silhouette fit only searches
+  near its start, one bad frame left the start 4–9 cm off, and every later frame started further
+  away (23–56 frames lost in a row, with the cube 43–83% visible). Each fit now also starts from the
+  red blob's centre and keeps the better match, so tracking recovers after a bad frame.
 
-With tracking the aim stays within ~5 mm of the cube even at 10 cm/s: perception keeps up. What
-remains is the **arm lagging behind the moving cube by about speed × 0.2 s** (right panel): 10 mm
-at 5 cm/s, 20 mm at 10 cm/s, with a long tail. The sway's sudden turns at its ends are the worst
-case (90th percentile 41 mm at 5 cm/s). This lag is the controller's: it is what motion prediction
-and a faster controller (computed torque) would have to remove.
+With tracking the aim stays within ~4–5 mm of the cube even at 10 cm/s: perception keeps up. What
+remains is the **arm lagging behind the moving cube by about speed × 0.2 s** (right panel): ~9–10 mm
+at 5 cm/s and 17 mm at 10 cm/s on the circle, with a long tail (90th percentile 49 mm at 10 cm/s).
+That lag is the controller's, which motion prediction and a faster controller (computed torque)
+address.
 
 **Predict (Option C1).** A constant-velocity Kalman filter (`predict.py`) remembers how the cube has
 been moving, and the gripper aims where the cube will be 0.2 s ahead (the lag measured above; fixed
@@ -295,25 +318,27 @@ in advance and checked on separate validation trials, seed 1, not tuned on the r
 
 ![prediction v1 and v2 vs tracking alone, per hand motion](results/dynamic/prediction.png)
 
-| 18 moving settings × 100 trials | Tracks only | Predicts, v1 | **Predicts, v2** |
+| 18 moving settings × 100 trials | Tracks only | **Predicts, v1** | Predicts, v2 |
 |---|---|---|---|
-| Total successes (of 1800) | 1709 | 1703 | **1735** |
-| Fastest speed ≥ 95%: circle / sway / jitter (cm/s) | 2 / 2 / 5 | 0.25 / 0.25 / 5 | **2 / 5 / 5** |
-| Circle at 10 cm/s | 59% | **89%** | 77% |
-| Sway at 5 cm/s | 81% | 93% | **98%** |
-| Jitter at 10 cm/s | **92%** | 84% | 85% |
+| Total successes (of 1800) | 1752 | **1775** | **1776** |
+| Fastest speed ≥ 95%: circle / sway / jitter (cm/s) | 5 / 10 / 10 | **10 / 10 / 10** | 5 / 10 / 10 |
+| Circle at 10 cm/s | 69% | **96%** | 90% |
+| Slow speeds (0.25–2 cm/s) | 100% | 98–100% | **100%** |
+| Median arm lag, still cube | 1.6 mm | 4.6 mm | 3.2 mm |
 
-- **v1 helped fast, smooth motion but cost 1–6% at slow speeds.** Its lag never fell below ~5–7 mm,
-  even for a still cube: the filter read the estimate's wobble (and its drift as the fingers cover
-  the cube) as velocity, and the 0.2 s lead amplified it. A first version had assumed 1.5 mm of
-  camera noise instead of measuring it, and prediction looked useless until it was measured.
+- **v1** (the filter as first designed) aims ahead whenever it estimates any velocity. It reaches
+  ≥ 95% success at every speed tested, up to 10 cm/s on all three motions. Its cost is a small lag
+  floor (~5 mm even for a still cube): the filter reads the estimate's wobble as velocity and the
+  0.2 s lead amplifies it. A first version had assumed 1.5 mm of camera noise instead of measuring
+  it, and prediction looked useless until it was measured.
 - **v2** sets the filter's trust in each frame from measurements on moving cubes (0.7 mm wobble
   with the gripper above 60 mm, 1.4 mm below, plus drift near the grasp), and only aims ahead once
-  the cube clearly moves (no lead below 1 cm/s, full lead above 2 cm/s). It restores 98–100% at
-  slow speeds and is the best variant overall.
-- **No variant wins everywhere.** v2's caution costs the fast circle (89% → 77%), and fast,
-  irregular jitter is best without prediction: any straight-line extrapolation overshoots its
-  sudden turns. Prediction pays off for sustained motion.
+  the cube clearly moves (no lead below 1 cm/s, full lead above 2 cm/s). It is perfect at slow
+  speeds but more cautious on the fast circle (90%). Overall the two tie (1775 vs 1776).
+- **What the earlier sweep got wrong.** Before the tracking-loss fix, v2 looked like the clear
+  winner (1735 vs 1703) and v1 seemed to fail fast jitter (84%). Both effects were mostly the
+  cascade: v2's refinements had been compensating for it. With the root cause fixed, the simpler
+  v1 is at least as good, and tracking alone improved too (1709 → 1752).
 
 ## What failed, and the fixes
 
@@ -339,7 +364,7 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (279 tests, ~1–2 min) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (282 tests, ~1–2 min) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
@@ -357,7 +382,8 @@ Two layers, for two different questions:
   - *dynamic targets:* hand speeds, the weld carrying the cube, the handover, and a baseline test
     that documents the look-once limit (a cube moving 1 cm/s is missed) next to the look-again
     planner that catches it; tracking catches a 2 cm/s circle that both miss; the silhouette fit
-    survives a shadowed, partly covered top face. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
+    survives a shadowed, partly covered top face; the three trials that used to cascade (1, 2, 8
+    at 10 cm/s) now succeed, checked under both renderers. CI renders with OSMesa (software OpenGL), and these tests must run there, not skip.
 - **How well does the whole system work?** `eval_place.py`: scenario-based statistical evaluation
   (the results above).
 

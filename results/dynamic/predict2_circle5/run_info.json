@@ -35,10 +35,10 @@
     ],
     "sweep_step": 1.0
   },
-  "git_commit": "800f4607e284d5d46242a66c4e4e0f4dec3dca97",
+  "git_commit": "6112f0014b4a53e1ea55d4743b35c882879db91c",
   "git_dirty": false,
-  "created": "2026-11-22T08:39:55+00:00",
-  "wall_seconds": 183.9,
+  "created": "2026-11-22T13:57:29+00:00",
+  "wall_seconds": 168.0,
   "versions": {
     "python": "3.10.12",
     "mujoco": "3.17.0",

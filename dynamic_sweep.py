@@ -114,9 +114,9 @@ def main():
     rows = summarize()
     print_table(rows)
     from plot_results import plot_dynamic  # matplotlib is only needed here
-    # Main figure: the path from looking once to predicting (v2). Prediction v1 vs v2: its own figure,
-    # 15 overlapping lines in one would be unreadable.
-    plot_dynamic(rows, MOTIONS, OUT / "dynamic.png", ["once", "again", "track", "predict2"])
+    # Main figure: the path from looking once to predicting (v1, the simpler of the two predictors,
+    # which ties v2 overall). v1 vs v2: its own figure; 15 overlapping lines in one are unreadable.
+    plot_dynamic(rows, MOTIONS, OUT / "dynamic.png", ["once", "again", "track", "predict"])
     from plot_results import plot_prediction
     plot_prediction(rows, MOTIONS, OUT / "prediction.png")
     print(f"\nsaved {OUT / 'summary.csv'} and {OUT / 'dynamic.png'}")
