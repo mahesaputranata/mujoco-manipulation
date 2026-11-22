@@ -431,7 +431,7 @@ def add_scenario_args(parser):
                         help="close/open the gripper on schedule instead of waiting for the arm to arrive")
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_scenario_args(parser)
     parser.add_argument("--trials", type=int, default=100)
@@ -443,6 +443,11 @@ def main():
     parser.add_argument("--yaw-sweep", action="store_true", help="fixed cube position, yaw 0..90 deg, both planners")
     parser.add_argument("--sweep-xy", type=float, nargs=2, default=(0.45, 0.20), metavar=("X", "Y"))
     parser.add_argument("--sweep-step", type=float, default=1.0, help="yaw step in degrees")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.replay is not None:

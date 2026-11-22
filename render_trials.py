@@ -31,21 +31,25 @@ COLORS = 256  # GIF palette size: fewer colours = much smaller files
 OK_COLOR, FAIL_COLOR, TEXT_COLOR, BAR_COLOR = (12, 163, 12), (208, 59, 59), (230, 230, 230), (20, 20, 20)
 
 
-def make_camera():
-    """A fixed view from the front-left that shows the arm, the table and the box."""
+def make_camera(closeup=None):
+    """A fixed view from the front-left that shows the arm, the table and the box.
+    With closeup = (x, y), a closer view centred on that point of the table (the cube's start)."""
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_FREE
     cam.lookat[:] = [0.25, 0.05, 0.22]
     cam.distance, cam.azimuth, cam.elevation = 1.9, 150, -28
+    if closeup is not None:
+        cam.lookat[:] = [closeup[0], closeup[1], 0.12]
+        cam.distance, cam.elevation = 0.95, -32
     return cam
 
 
 class FilmingStepper(Stepper):
     """A Stepper that also renders a frame every `every` physics steps."""
 
-    def __init__(self, model, data, controller, renderer, every, hooks=()):
+    def __init__(self, model, data, controller, renderer, every, hooks=(), closeup=None):
         super().__init__(model, data, controller=controller, hooks=hooks)
-        self.renderer, self.every, self.cam = renderer, every, make_camera()
+        self.renderer, self.every, self.cam = renderer, every, make_camera(closeup)
         self.frames, self.count = [], 0
 
     def snapshot(self):
@@ -64,7 +68,8 @@ def render_trial(trial, args, width, height, speed):
     model, data, kwargs = setup_trial(trial, args)
     renderer = mujoco.Renderer(model, height, width)
     every = max(1, round(speed / (FPS * model.opt.timestep)))  # physics steps per GIF frame
-    step = FilmingStepper(model, data, controller_for(trial, args), renderer, every, kwargs.pop("hooks"))
+    closeup = (trial["x"], trial["y"]) if getattr(args, "closeup", False) else None
+    step = FilmingStepper(model, data, controller_for(trial, args), renderer, every, kwargs.pop("hooks"), closeup)
     outcome, attempts = pick_and_place(model, data, step, **kwargs)
     frames = step.frames or [step.snapshot()] * FPS  # e.g. IK_FAIL before any motion: a still second
     renderer.close()
@@ -81,11 +86,21 @@ def caption(frame, lines, outcome):
     return img
 
 
+PLANNERS = {  # --planners: planner variants for the dynamic-target comparison
+    "once": dict(look_again=False, track=False),
+    "again": dict(look_again=True, track=False),
+    "track": dict(look_again=False, track=True),
+}
+PLANNER_NAMES = {"once": "looks once", "again": "looks again", "track": "tracks the cube"}
+
+
 def label(trial, args, outcome, attempts):
-    mode = "original system" if args.baseline else "improved system"
+    mode = getattr(args, "planner_name", None) or ("original system" if args.baseline else "improved system")
     rep = f".{trial['repeat']}" if trial["repeat"] else ""
-    return [f"{outcome}  ({mode}, {attempts} attempt{'s' * (attempts > 1)})",
-            f"trial {trial['trial']}{rep}: x={trial['x']:.2f} y={trial['y']:.2f} yaw={trial['yaw_deg']:+.0f} deg"]
+    second = f"trial {trial['trial']}{rep}: x={trial['x']:.2f} y={trial['y']:.2f} yaw={trial['yaw_deg']:+.0f} deg"
+    if "motion" in trial:
+        second = f"cube moved by a hand: {trial['motion']}, {trial['speed_cm_s']:g} cm/s"
+    return [f"{outcome}  ({mode}, {attempts} attempt{'s' * (attempts > 1)})", second]
 
 
 def save_gif(frames, path):
@@ -108,23 +123,26 @@ def save_gif(frames, path):
 
 def render(trial, args, opts):
     tag = f"trial{trial['trial']}" + (f".{trial['repeat']}" if trial["repeat"] else "")
-    if opts.compare:
+    if opts.compare or opts.planners:
         sides = []
-        for baseline in (True, False):
-            side_args = argparse.Namespace(**{**vars(args), "baseline": baseline})
-            frames, outcome, attempts = render_trial(trial, side_args, opts.width, opts.height, opts.speed)
+        variants = ([dict(baseline=True), dict(baseline=False)] if not opts.planners else
+                    [dict(baseline=False, planner_name=PLANNER_NAMES[p], **PLANNERS[p]) for p in opts.planners.split(",")])
+        for variant in variants:
+            side_args = argparse.Namespace(**{**vars(args), **variant})
+            frames, outcome, attempts = render_trial(trial, side_args, opts.width, opts.height, opts.playback)
             sides.append([caption(f, label(trial, side_args, outcome, attempts), outcome) for f in frames])
         n = max(map(len, sides))
         sides = [s + [s[-1]] * (n - len(s)) for s in sides]  # the shorter run holds its last frame
         frames = []
-        for left, right in zip(*sides):
-            both = Image.new("RGB", (2 * opts.width, opts.height))
-            both.paste(left, (0, 0))
-            both.paste(right, (opts.width, 0))
-            frames.append(both)
-        name = f"{tag}_compare.gif"
+        for panels in zip(*sides):
+            row = Image.new("RGB", (len(panels) * opts.width, opts.height))
+            for k, panel in enumerate(panels):
+                row.paste(panel, (k * opts.width, 0))
+            frames.append(row)
+        name = (f"{tag}_compare.gif" if not opts.planners else
+                f"{tag}_{trial.get('motion', 'static')}{trial.get('speed_cm_s', 0):g}_{opts.planners.replace(',', '_')}.gif")
     else:
-        frames, outcome, attempts = render_trial(trial, args, opts.width, opts.height, opts.speed)
+        frames, outcome, attempts = render_trial(trial, args, opts.width, opts.height, opts.playback)
         frames = [caption(f, label(trial, args, outcome, attempts), outcome) for f in frames]
         name = f"{tag}_{'baseline' if args.baseline else 'fixed'}_{outcome}.gif"
     save_gif(frames, opts.out / name)
@@ -153,7 +171,7 @@ def pick_trials(args, opts):
     raise SystemExit("choose trials with --trial, --from-csv or --fragile")
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_scenario_args(parser)
     parser.add_argument("--trial", type=int, nargs="+", help="trial number(s) to render")
@@ -163,10 +181,18 @@ def main():
     parser.add_argument("--fragile", help="render the poses.csv poses closest to 50%% success")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--compare", action="store_true", help="original vs improved system side by side")
-    parser.add_argument("--speed", type=float, default=2.0, help="playback speed vs real time")
+    parser.add_argument("--planners", help="planner variants side by side, e.g. once,again,track (dynamic targets)")
+    # Not --speed: that is the scenario's hand speed (dynamic targets) in add_scenario_args.
+    parser.add_argument("--playback", type=float, default=2.0, help="GIF playback speed vs real time")
+    parser.add_argument("--closeup", action="store_true", help="GIF camera closer, centred on the cube's start")
     parser.add_argument("--width", type=int, default=400)
     parser.add_argument("--height", type=int, default=300)
     parser.add_argument("--out", type=Path, default=ROOT / "results" / "gifs")
+    return parser
+
+
+def main():
+    parser = build_parser()
     opts = parser.parse_args()
     opts.out.mkdir(parents=True, exist_ok=True)
 

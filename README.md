@@ -265,6 +265,12 @@ gripper above it does not block the camera's angled view. The look is now 1.8 s 
 closes instead of 3.8 s, so the tolerated speed doubles: circle 0.5 → 1 cm/s, sway 0.5 → 2 cm/s,
 jitter 2 → 5 cm/s (success ≥ 95%). Still far below a real hand.
 
+![the same moving cube, three planners: looks once, looks again, tracks](results/gifs/trial0_circle5_once_again_track.gif)
+
+*The same trial, a cube circling at 5 cm/s (the hand moving it is invisible). Looking once or
+twice, the gripper closes where the cube was and misses twice; tracking follows it and grasps it
+on the first attempt.*
+
 **Track (Option B).** The camera keeps watching every frame (20 Hz) of the descent and the grasp,
 and the gripper's aim follows the cube (visual servoing, `--track`). Two problems had to be solved
 first, both found by logging what the camera saw frame by frame:
@@ -306,7 +312,7 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (271 tests, ~40 s) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (274 tests, ~40 s) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
@@ -367,6 +373,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python eval_place.py --yaw-sweep --pos-noise 5 --yaw-noise 5 --repeats 10 --sweep-step 3
 .venv/bin/python eval_place.py --baseline --workspace wide --replay 7   # replay one trial in 3D
 .venv/bin/python render_trials.py --workspace wide --trial 7 --compare  # ... or as a GIF
+.venv/bin/python render_trials.py --perception camera --motion circle --speed 5 --trial 0 \
+    --planners once,again,track --closeup                         # the moving-cube GIF above
 .venv/bin/python plot_controllers.py                              # controller figures (needs the runs above)
 ```
 
