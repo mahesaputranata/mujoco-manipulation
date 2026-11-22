@@ -1,0 +1,47 @@
+{
+  "command": "eval_place.py --perception camera --track --predict 0 --motion sway --speed 5 --trials 40 --seed 1 --tag leadcheck/sway5_lead0",
+  "args": {
+    "seed": 1,
+    "baseline": false,
+    "retries": 1,
+    "ik_restarts": 8,
+    "workspace": "default",
+    "pos_noise": 0.0,
+    "yaw_noise": 0.0,
+    "rand_physics": false,
+    "perception": "camera",
+    "calibration": "ideal",
+    "camera_rot": 0.0,
+    "camera_shift": 0.0,
+    "focal_err": 0.0,
+    "look_again": false,
+    "track": true,
+    "predict": 0.0,
+    "motion": "sway",
+    "speed": 5.0,
+    "controller": null,
+    "no_arrive": false,
+    "trials": 40,
+    "repeats": 1,
+    "workers": 8,
+    "tag": "leadcheck/sway5_lead0",
+    "replay": null,
+    "repeat": 0,
+    "yaw_sweep": false,
+    "sweep_xy": [
+      0.45,
+      0.2
+    ],
+    "sweep_step": 1.0
+  },
+  "git_commit": "37fc37d8f90a7b0d4f7cecc44ea16175d9b777bf",
+  "git_dirty": true,
+  "created": "2026-11-22T00:44:18+00:00",
+  "wall_seconds": 101.3,
+  "versions": {
+    "python": "3.10.12",
+    "mujoco": "3.17.0",
+    "numpy": "2.2.6",
+    "opencv": "5.1.0"
+  }
+}

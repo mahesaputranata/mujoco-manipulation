@@ -209,7 +209,8 @@ def setup_trial(trial, args):
                              ik_restarts=0 if baseline else args.ik_restarts,
                              arrive=not (baseline or args.no_arrive),
                              look_again=args.look_again and not baseline,
-                             track=args.track and not baseline)
+                             track=args.track and not baseline,
+                             predict_lead=0.0 if baseline else args.predict)
 
 
 def controller_for(trial, args):
@@ -287,6 +288,8 @@ def default_tag(args):
         parts.append("lookagain")
     if args.track:
         parts.append("track")
+    if args.predict:
+        parts.append(f"predict{args.predict:g}")
     if args.perception == "camera":
         parts.append("camera")
         if args.calibration != "ideal":
@@ -422,6 +425,8 @@ def add_scenario_args(parser):
                         help="take a second look once the gripper is above the cube and re-plan the descent")
     parser.add_argument("--track", action="store_true",
                         help="track the cube during the descent and the grasp (visual servoing, Option B)")
+    parser.add_argument("--predict", type=float, default=0.0, metavar="LEAD",
+                        help="with --track: predict the cube's motion and aim LEAD seconds ahead (Option C1)")
     parser.add_argument("--motion", choices=["static", "circle", "sway", "jitter"],
                         help="dynamic target: a hand holds the cube and moves it (hand_motion.py)")
     parser.add_argument("--speed", type=float, default=0.0, help="hand speed in cm/s (with --motion)")

@@ -37,6 +37,7 @@ CENTRE_TOL = 0.004           # m: close only once the fingertips are this close 
 TRACK_TIMEOUT = 1.0          # s at grasp height without centring: close anyway
 CLOSE_TIME = 1.0             # s of closing (as in the plan), still following the cube
 MAX_SPEED = 0.5              # m/s: a frame whose estimate jumped faster than this is rejected
+MAX_BLIND = 0.25             # s: with prediction, extrapolate at most this far past the last good frame
 
 OUTCOMES = ["OK", "NOT_SEEN", "IK_FAIL", "GRASP_MISS", "DROPPED", "MISSED_BOX"]
 
@@ -164,7 +165,7 @@ def ground_truth(data):
 
 METRICS = ["grasp_offset_mm", "grasp_twist_deg", "place_error_mm", "target_shift_mm", "look_age_s",
            "relook_seen", "relook_shift_mm", "track_lag_mm", "frames_lost", "reach_error_mm", "track_error_mm",
-           "hold_error_mm", "wait_s", "descent_s"]
+           "hold_error_mm", "wait_s", "descent_s", "pred_err_mm"]
 
 
 def tcp_error(model, data, q_target, scratch):
@@ -207,7 +208,7 @@ def wrap_grasp_angle(a):
     return (a + np.pi / 2) % np.pi - np.pi / 2
 
 
-def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK_HZ, say=None, psi=None):
+def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK_HZ, say=None, psi=None, lead=0.0):
     """Descend onto the cube while watching it (visual servoing), close the gripper, keep following.
 
     Every camera frame: estimate the cube's pose, aim the fingertips at its centre at a height that
@@ -215,6 +216,10 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
     A frame that shows the cube jumping faster than MAX_SPEED, or no cube at all (the fingers can
     block the view close to the grasp), is rejected: the aim stays on the last good estimate.
     Returns the gripper turn used, so the rest of the plan can continue at the same wrist angle.
+
+    With lead > 0 (Option C1, predict.py) a Kalman filter remembers how the cube has been moving,
+    and the aim is where the cube will be `lead` seconds from now. Rejected frames no longer freeze
+    the aim: the filter keeps predicting. pred_err_mm logs how far those predictions were off.
     """
     say = say or (lambda msg: None)
     quick = getattr(perceive, "quick", None)  # one image per frame, tracking from the last estimate
@@ -224,19 +229,35 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
     z_grasp, z = est_pos[2], est_pos[2] + 0.15
     q_next = step.q_cmd.copy()
     last_seen, lost, start, closing_since, at_height_since = data.time, 0, data.time, None, None
-    lag = []
+    lag, pending, pred_errs = [], [], []
+    kf = None
+    if lead > 0:
+        from predict import ConstantVelocityKF
+        kf = ConstantVelocityKF()
     while True:
-        seen = quick(data, guess=(est_pos, est_yaw)) if quick else perceive(data)
+        predicting = kf is not None and kf.x is not None
+        expected = kf.position_at(data.time) if predicting else est_pos[:2]
+        guess = np.array([expected[0], expected[1], est_pos[2]])  # re-find the cube where it should be now
+        seen = quick(data, guess=(guess, est_yaw)) if quick else perceive(data)
         dt = data.time - last_seen
-        if seen is not None and np.linalg.norm(seen[0][:2] - est_pos[:2]) <= MAX_SPEED * dt + 0.01:
+        if seen is not None and np.linalg.norm(seen[0][:2] - expected) <= MAX_SPEED * dt + 0.01:
             est_pos, est_yaw, last_seen = np.array(seen[0], float), seen[1], data.time
+            if kf is not None:
+                kf.update(data.time, est_pos[:2])
         else:
             lost += 1
+        aim = est_pos[:2].copy()
+        if kf is not None and kf.x is not None:
+            # A straight-line extrapolation goes stale when the cube turns while unseen: cap it.
+            aim = kf.position_at(min(data.time + lead, last_seen + MAX_BLIND))
+            pending.append((data.time + lead, aim.copy()))
+        while pending and pending[0][0] <= data.time + 1e-9:  # predictions whose time has come
+            pred_errs.append(np.linalg.norm(pending.pop(0)[1] - data.body("cube").xpos[:2]))
         # Of the two grasps (the cube's two pairs of faces), keep the one closest to the current wrist.
         psi = min(grasp_angles(est_yaw, align), key=lambda a: abs(wrap_grasp_angle(a - psi)))
         if closing_since is None:
             z = max(z_grasp, z - DESCENT_SPEED / hz)
-        target = np.array([est_pos[0], est_pos[1], z])
+        target = np.array([aim[0], aim[1], z])
         q_prev = q_next
         q_next, *_ = solve_ik(model, data, TCP_SITE, target, grasp_quat(psi), q_init=q_prev, max_iters=30)
 
@@ -248,7 +269,7 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
         timed_out = at_height_since is not None and data.time - at_height_since > TRACK_TIMEOUT
         if closing_since is None and z <= z_grasp and (centred or timed_out):
             closing_since = data.time
-            m["target_shift_mm"] = 1000 * np.linalg.norm(cube[:2] - est_pos[:2])
+            m["target_shift_mm"] = 1000 * np.linalg.norm(cube[:2] - aim)
             m["look_age_s"] = data.time - last_seen
             m["reach_error_mm"] = 1000 * np.linalg.norm(tcp - target)
             yaw_before_close = cube_yaw(data)
@@ -263,12 +284,14 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
     m["grasp_twist_deg"] = np.degrees(wrap_cube_angle(cube_yaw(data) - yaw_before_close))
     m["track_lag_mm"] = 1000 * np.mean(lag[-max(1, len(lag) // 2):])  # gripper vs cube, at grasp height
     m["frames_lost"] = lost
+    if pred_errs:
+        m["pred_err_mm"] = 1000 * np.median(pred_errs)
     m["descent_s"] = closing_since - start
     return psi
 
 
 def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
-                   metrics=None, arrive=True, look_again=False, track=False):
+                   metrics=None, arrive=True, look_again=False, track=False, predict_lead=0.0):
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
@@ -328,7 +351,8 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
             if track:
                 yield from run_plan(model, data, now["plan"][:1], step)  # to above the cube
                 psi0 = quat_turn(now["quat"])
-                psi = track_descent(model, data, step, perceive, now["cube_pos"], yaw, align, m, say=say, psi=psi0)
+                psi = track_descent(model, data, step, perceive, now["cube_pos"], yaw, align, m, say=say, psi=psi0,
+                                    lead=predict_lead)
                 # The cube is in the fingers now (or missed): plan lift, carry and place from here.
                 here = data.site(TCP_SITE).xpos.copy()
                 new_plan, ok, new_quat = make_plan(model, data, here, psi, align, ik_restarts, log, angles=[psi])

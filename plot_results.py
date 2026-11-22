@@ -183,7 +183,7 @@ MOTION_STYLE = {"circle": "#2a78d6", "sway": "#eb6834", "jitter": "#1baf7a"}  # 
 
 
 VARIANT_STYLE = {"once": (":", 1.2, "looks once"), "again": ("--", 1.4, "looks again above the cube"),
-                 "track": ("-", 2.4, "tracks the cube (every frame)")}
+                 "track": ("-.", 1.8, "tracks the cube"), "predict": ("-", 2.6, "tracks + predicts 0.2 s ahead")}
 
 
 def plot_dynamic(rows, motions, path, variants=("once",)):
@@ -197,14 +197,14 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
     for ax in (ax_ok, ax_shift, ax_lag):
         _style_axes(ax)
         ax.set_xscale("log")
-    for motion in motions:  # arm lag: only the tracking variant measures it
-        pts = sorted((r for r in rows if r.get("variant") == "track" and r["motion"] == motion
-                      and r["speed_cm_s"] > 0), key=lambda r: r["speed_cm_s"])
-        if pts:
-            ax_lag.plot([r["speed_cm_s"] for r in pts], [r["lag_median"] for r in pts], color=MOTION_STYLE[motion],
-                        lw=2.4, marker="o", ms=4, zorder=3)
-            ax_lag.plot([r["speed_cm_s"] for r in pts], [r["lag_p90"] for r in pts], color=MOTION_STYLE[motion],
-                        lw=1, ls="--", zorder=3)
+    for variant in ("track", "predict"):  # arm lag: only the tracking variants measure it
+        ls, lw, _ = VARIANT_STYLE[variant]
+        for motion in motions:
+            pts = sorted((r for r in rows if r.get("variant") == variant and r["motion"] == motion
+                          and r["speed_cm_s"] > 0), key=lambda r: r["speed_cm_s"])
+            if pts:
+                ax_lag.plot([r["speed_cm_s"] for r in pts], [r["lag_median"] for r in pts],
+                            color=MOTION_STYLE[motion], ls=ls, lw=lw, marker="o", ms=4, zorder=3)
     lag_pts = [r for r in rows if r.get("variant") == "track" and r["speed_cm_s"] > 0]
     if lag_pts:
         v = np.array(sorted({r["speed_cm_s"] for r in lag_pts}))
@@ -212,8 +212,7 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
         ax_lag.annotate("speed × 0.2 s", (v[-1], 20 * v[-1] / 10), (-4, 6), textcoords="offset points", ha="right",
                         color=INK_2, fontsize=8)
     ax_lag.set_yscale("log")
-    ax_lag.set_ylabel("gripper behind the cube at grasp height\n(mm; median, dashed = 90th pct)", color=INK_2,
-                      fontsize=9)
+    ax_lag.set_ylabel("gripper behind the cube at grasp height\n(mm, median)", color=INK_2, fontsize=9)
     ax_lag.set_title("Tracking: the arm lags behind", color=INK, fontsize=10, loc="left")
     for variant in variants:
         ls, lw, vlabel = VARIANT_STYLE[variant]
