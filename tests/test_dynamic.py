@@ -106,3 +106,12 @@ def test_tracking_catches_a_cube_that_look_again_misses():
     assert row["outcome"] == "OK"
     assert row["target_shift_mm"] < 12  # aimed at where the cube is, not where it was
     assert row["frames_lost"] <= 5  # the silhouette fit keeps seeing it under the gripper's shadow
+
+
+def test_tracking_recovers_instead_of_cascading():
+    """Trial 8 at 10 cm/s once lost 56 frames in a row: the silhouette fit started from a stale
+    guess 4-9 cm away and every later frame started further off, although the cube stayed 80-90%
+    visible. Starting each fit also from the red blob's centre lets tracking recover."""
+    row = run(8, "--motion", "circle", "--speed", "10", "--perception", "camera", "--track")
+    assert row["outcome"] == "OK"
+    assert row["frames_lost"] <= 10

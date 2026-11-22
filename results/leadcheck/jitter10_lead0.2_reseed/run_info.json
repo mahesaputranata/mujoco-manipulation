@@ -1,0 +1,48 @@
+{
+  "command": "eval_place.py --perception camera --track --trials 40 --seed 1 --tag leadcheck/jitter10_lead0.2_reseed --motion jitter --speed 10 --predict 0.2",
+  "args": {
+    "seed": 1,
+    "baseline": false,
+    "retries": 1,
+    "ik_restarts": 8,
+    "workspace": "default",
+    "pos_noise": 0.0,
+    "yaw_noise": 0.0,
+    "rand_physics": false,
+    "perception": "camera",
+    "calibration": "ideal",
+    "camera_rot": 0.0,
+    "camera_shift": 0.0,
+    "focal_err": 0.0,
+    "look_again": false,
+    "track": true,
+    "predict": 0.2,
+    "predict_v2": false,
+    "motion": "jitter",
+    "speed": 10.0,
+    "controller": null,
+    "no_arrive": false,
+    "trials": 40,
+    "repeats": 1,
+    "workers": 8,
+    "tag": "leadcheck/jitter10_lead0.2_reseed",
+    "replay": null,
+    "repeat": 0,
+    "yaw_sweep": false,
+    "sweep_xy": [
+      0.45,
+      0.2
+    ],
+    "sweep_step": 1.0
+  },
+  "git_commit": "8a2655ec17865c2f9b3522ee332e0b439d0f3d6f",
+  "git_dirty": true,
+  "created": "2026-11-22T10:22:28+00:00",
+  "wall_seconds": 85.8,
+  "versions": {
+    "python": "3.10.12",
+    "mujoco": "3.17.0",
+    "numpy": "2.2.6",
+    "opencv": "5.1.0"
+  }
+}

@@ -205,7 +205,8 @@ SUB = 8  # sub-pixel precision for drawing outlines (fixed point with 3 fraction
 MIN_VISIBLE = 0.4
 
 
-def fit_silhouette(rgb, camera, guess_pos, guess_yaw, half, min_coverage=0.85, min_visible=MIN_VISIBLE):
+def fit_silhouette(rgb, camera, guess_pos, guess_yaw, half, min_coverage=0.85, min_visible=MIN_VISIBLE,
+                   reseed=True):
     """Cube pose from the whole red silhouette, given its size: robust to shadows on the top face.
 
     While tracking, the gripper's shadow darkens the cube's top face, so "brightest part = top face"
@@ -237,20 +238,34 @@ def fit_silhouette(rgb, camera, guess_pos, guess_yaw, half, min_coverage=0.85, m
         inside, area = np.count_nonzero(model & crop), np.count_nonzero(model)
         return inside - 3.0 * (n_red - inside) - 0.3 * (area - inside), (inside, area)
 
-    best = np.array([guess_pos[0], guess_pos[1], guess_yaw], float)
-    best_score, best_counts = score(best)
-    steps = np.array([0.006, 0.006, np.radians(6.0)])  # x, y in m; yaw in rad
-    while steps[0] > 0.00025:
-        improved = False
-        for k in range(3):
-            for sign in (1.0, -1.0):
-                trial = best.copy()
-                trial[k] += sign * steps[k]
-                sc, counts = score(trial)
-                if sc > best_score:
-                    best, best_score, best_counts, improved = trial, sc, counts, True
-        if not improved:
-            steps /= 2
+    def search(start):
+        """Pattern search from `start` = (x, y, yaw): try steps along each axis, halve when stuck."""
+        best = np.array(start, float)
+        best_score, best_counts = score(best)
+        steps = np.array([0.006, 0.006, np.radians(6.0)])  # x, y in m; yaw in rad
+        while steps[0] > 0.00025:
+            improved = False
+            for k in range(3):
+                for sign in (1.0, -1.0):
+                    trial = best.copy()
+                    trial[k] += sign * steps[k]
+                    sc, counts = score(trial)
+                    if sc > best_score:
+                        best, best_score, best_counts, improved = trial, sc, counts, True
+            if not improved:
+                steps /= 2
+        return best, best_score, best_counts
+
+    # Two starts, keep the better fit. The search only looks nearby, so from the previous estimate
+    # alone one bad frame could start a cascade: the guess goes stale, the cube moves on, and every
+    # later frame starts further away (42-87 mm off in failed trials, 23-56 frames lost in a row,
+    # with the cube 43-83% visible). The red blob's centre, projected to the cube's mid-height, is
+    # never more than a few mm off and does not depend on earlier frames.
+    starts = [(guess_pos[0], guess_pos[1], guess_yaw)]
+    if reseed:
+        centre = camera.pixels_to_plane(np.array([[us.mean() + 0.5, vs.mean() + 0.5]]), half)[0]
+        starts.append((centre[0], centre[1], guess_yaw))
+    best, best_score, best_counts = max((search(s) for s in starts), key=lambda r: r[1])
     inside, area = best_counts
     coverage, visible = inside / max(n_red, 1), inside / max(area, 1)
     if coverage < min_coverage or visible < min_visible:
