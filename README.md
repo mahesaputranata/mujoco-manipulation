@@ -44,6 +44,7 @@ RGB camera ──► perception ──► planner ──► IK ──► smooth 
 | [`eval_place.py`](eval_place.py) | Randomized evaluation: success rate with 95% CI, failure types, margins, sweeps |
 | [`render_trials.py`](render_trials.py) | Replays any trial from its seed as a GIF (also side by side) |
 | [`hand_motion.py`](hand_motion.py), [`dynamic_sweep.py`](dynamic_sweep.py) | Dynamic targets: a hand moves the cube; success vs hand speed |
+| [`predict.py`](predict.py) | Constant-velocity Kalman filter: where the moving cube will be |
 | [`calib_sweep.py`](calib_sweep.py) | Camera calibration experiment: knocked camera, stale belief vs self-locating from ArUco tags |
 | [`plot_controllers.py`](plot_controllers.py), [`plot_perception.py`](plot_perception.py) | Controller and perception figures |
 | [`scene.py`](scene.py) | Builds the scene with `MjSpec`: UR5e + 2F-85 from MuJoCo Menagerie, cube, box |
@@ -288,6 +289,32 @@ at 5 cm/s, 20 mm at 10 cm/s, with a long tail. The sway's sudden turns at its en
 case (90th percentile 41 mm at 5 cm/s). This lag is the controller's: it is what motion prediction
 and a faster controller (computed torque) would have to remove.
 
+**Predict (Option C1).** A constant-velocity Kalman filter (`predict.py`) remembers how the cube has
+been moving, and the gripper aims where the cube will be 0.2 s ahead (the lag measured above; fixed
+in advance and checked on separate validation trials, seed 1, not tuned on the reported ones).
+
+![prediction v1 and v2 vs tracking alone, per hand motion](results/dynamic/prediction.png)
+
+| 18 moving settings × 100 trials | Tracks only | Predicts, v1 | **Predicts, v2** |
+|---|---|---|---|
+| Total successes (of 1800) | 1709 | 1703 | **1735** |
+| Fastest speed ≥ 95%: circle / sway / jitter (cm/s) | 2 / 2 / 5 | 0.25 / 0.25 / 5 | **2 / 5 / 5** |
+| Circle at 10 cm/s | 59% | **89%** | 77% |
+| Sway at 5 cm/s | 81% | 93% | **98%** |
+| Jitter at 10 cm/s | **92%** | 84% | 85% |
+
+- **v1 helped fast, smooth motion but cost 1–6% at slow speeds.** Its lag never fell below ~5–7 mm,
+  even for a still cube: the filter read the estimate's wobble (and its drift as the fingers cover
+  the cube) as velocity, and the 0.2 s lead amplified it. A first version had assumed 1.5 mm of
+  camera noise instead of measuring it, and prediction looked useless until it was measured.
+- **v2** sets the filter's trust in each frame from measurements on moving cubes (0.7 mm wobble
+  with the gripper above 60 mm, 1.4 mm below, plus drift near the grasp), and only aims ahead once
+  the cube clearly moves (no lead below 1 cm/s, full lead above 2 cm/s). It restores 98–100% at
+  slow speeds and is the best variant overall.
+- **No variant wins everywhere.** v2's caution costs the fast circle (89% → 77%), and fast,
+  irregular jitter is best without prediction: any straight-line extrapolation overshoots its
+  sudden turns. Prediction pays off for sustained motion.
+
 ## What failed, and the fixes
 
 Each fix came from replaying a specific failed trial, not from guessing.
@@ -312,7 +339,7 @@ Each fix came from replaying a specific failed trial, not from guessing.
 
 Two layers, for two different questions:
 
-- **Is each part correct?** A pytest suite (274 tests, ~40 s) runs on every push via GitHub Actions:
+- **Is each part correct?** A pytest suite (279 tests, ~1–2 min) runs on every push via GitHub Actions:
   - *unit:* IK round trips (FK → IK → same pose), behaviour on unreachable targets, collision
     detection, grasp angles square to the cube's faces, Wilson confidence intervals, trial sampling;
   - *integration:* a full pick-and-place with every controller in `CONTROLLERS` (new controllers
@@ -323,6 +350,10 @@ Two layers, for two different questions:
     known answer, rendered-image accuracy, rejection of bad frames, an end-to-end run with the
     camera, and the calibration experiment (the camera is knocked by exactly the requested amount,
     every method gets the same knock, the tags locate the camera, stale misses after a 2° knock);
+  - *prediction:* the Kalman filter learns a constant velocity exactly, keeps predicting without
+    frames, and beats the current estimate on a circling cube; prediction cuts the lag on a swaying
+    cube (judged on the median of 4 trials: a single-trial version passed on the laptop's GPU and
+    failed under CI's software renderer);
   - *dynamic targets:* hand speeds, the weld carrying the cube, the handover, and a baseline test
     that documents the look-once limit (a cube moving 1 cm/s is missed) next to the look-again
     planner that catches it; tracking catches a 2 cm/s circle that both miss; the silhouette fit
@@ -368,7 +399,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python eval_place.py --workspace wide --pos-noise 5 --yaw-noise 5 --rand-physics
 .venv/bin/python eval_place.py --perception camera               # the arm finds the cube with its camera
 .venv/bin/python calib_sweep.py                                   # camera calibration experiment (~20 min, resumable)
-.venv/bin/python dynamic_sweep.py                                 # moving cube: once / again / track (~1.5 h, resumable)
+.venv/bin/python dynamic_sweep.py                                 # moving cube, 5 planner variants (~3 h, resumable)
 .venv/bin/python eval_place.py --controller pd --no-arrive        # improved planner, original control
 .venv/bin/python eval_place.py --yaw-sweep --pos-noise 5 --yaw-noise 5 --repeats 10 --sweep-step 3
 .venv/bin/python eval_place.py --baseline --workspace wide --replay 7   # replay one trial in 3D
@@ -393,7 +424,7 @@ vision-language-action (VLA) policy.
 - [x] Camera perception: fixed RGB camera, cube pose from the image
 - [x] Camera calibration experiment; self-locating camera from ArUco tags
 - [x] Dynamic targets: baseline, a second look above the cube, tracking with a shadow-robust
-      silhouette fit (this page)
+      silhouette fit, motion prediction with a Kalman filter (this page)
 - [ ] Computed-torque control (removes the motion lag), then operational-space / impedance
       control for contact-rich tasks (in progress)
 

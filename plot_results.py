@@ -187,18 +187,18 @@ VARIANT_STYLE = {"once": (":", 1.2, "looks once"), "again": ("--", 1.4, "looks a
                  "predict2": ("-", 2.6, "predicts (v2)")}
 
 
-def plot_dynamic(rows, motions, path, variants=("once",)):
+def plot_dynamic(rows, motions, path, variants=("once",), title=None):
     """Dynamic targets: success rate and target shift vs hand speed. Colour = hand motion,
     line style = planner variant (dotted: looks once; dashed: looks again; solid: tracks)."""
     variants = list(variants)
     fig, (ax_ok, ax_shift, ax_lag) = plt.subplots(1, 3, figsize=(15, 4.9))
     fig.patch.set_facecolor(SURFACE)
-    fig.suptitle("Dynamic targets: a hand moves the cube while the robot grasps it (100 trials per point)",
+    fig.suptitle(title or "Dynamic targets: a hand moves the cube while the robot grasps it (100 trials per point)",
                  color=INK, fontsize=12, x=0.01, ha="left")
     for ax in (ax_ok, ax_shift, ax_lag):
         _style_axes(ax)
         ax.set_xscale("log")
-    for variant in ("track", "predict", "predict2"):  # arm lag: only the tracking variants measure it
+    for variant in [v for v in ("track", "predict", "predict2") if v in variants]:  # only tracking measures lag
         ls, lw, _ = VARIANT_STYLE[variant]
         for motion in motions:
             pts = sorted((r for r in rows if r.get("variant") == variant and r["motion"] == motion
@@ -254,6 +254,48 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
     for text in leg.get_texts():
         text.set_color(INK)
     fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
+PREDICT_STYLE = {"track": ("#8a8984", "tracks only"), "predict": ("#eb6834", "predicts, v1"),
+                 "predict2": ("#2a78d6", "predicts, v2")}
+
+
+def plot_prediction(rows, motions, path):
+    """Prediction v1 / v2 vs tracking alone: one column per hand motion, success on top, arm lag below."""
+    fig, axes = plt.subplots(2, len(motions), figsize=(12, 6.2), sharex=True)
+    fig.patch.set_facecolor(SURFACE)
+    fig.suptitle("Prediction: tracking alone vs aiming 0.2 s ahead (100 trials per point)", color=INK,
+                 fontsize=12, x=0.01, ha="left")
+    speeds = sorted({r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0})
+    for col, motion in enumerate(motions):
+        ax_ok, ax_lag = axes[0, col], axes[1, col]
+        for ax in (ax_ok, ax_lag):
+            _style_axes(ax)
+            ax.set_xscale("log")
+        for variant, (color, label) in PREDICT_STYLE.items():
+            pts = sorted((r for r in rows if r.get("variant") == variant and r["motion"] == motion
+                          and r["speed_cm_s"] > 0), key=lambda r: r["speed_cm_s"])
+            if not pts:
+                continue
+            x = [r["speed_cm_s"] for r in pts]
+            ax_ok.plot(x, [100 * r["success"] for r in pts], color=color, lw=2, marker="o", ms=4, label=label, zorder=3)
+            ax_ok.fill_between(x, [100 * r["ci_lo"] for r in pts], [100 * r["ci_hi"] for r in pts], color=color,
+                               alpha=0.12, lw=0)
+            ax_lag.plot(x, [r["lag_median"] for r in pts], color=color, lw=2, marker="o", ms=4, zorder=3)
+        ax_ok.set_title(motion, color=INK, fontsize=10, loc="left")
+        ax_ok.set_ylim(50, 102)
+        ax_lag.set_yscale("log")
+        ax_lag.set_xticks(speeds, [f"{v:g}" for v in speeds])
+        ax_lag.minorticks_off()
+        ax_lag.set_xlabel("hand speed (cm/s)", color=INK_2)
+    axes[0, 0].set_ylabel("success (%)", color=INK_2)
+    axes[1, 0].set_ylabel("arm behind the cube\nat grasp height (mm, median)", color=INK_2, fontsize=9)
+    leg = axes[0, 0].legend(frameon=False, fontsize=9, loc="lower left")
+    for text in leg.get_texts():
+        text.set_color(INK)
+    fig.tight_layout()
     fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
 
