@@ -190,13 +190,31 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
     """Dynamic targets: success rate and target shift vs hand speed. Colour = hand motion,
     line style = planner variant (dotted: looks once; dashed: looks again; solid: tracks)."""
     variants = list(variants)
-    fig, (ax_ok, ax_shift) = plt.subplots(1, 2, figsize=(11.5, 4.6))
+    fig, (ax_ok, ax_shift, ax_lag) = plt.subplots(1, 3, figsize=(15, 4.9))
     fig.patch.set_facecolor(SURFACE)
     fig.suptitle("Dynamic targets: a hand moves the cube while the robot grasps it (100 trials per point)",
                  color=INK, fontsize=12, x=0.01, ha="left")
-    for ax in (ax_ok, ax_shift):
+    for ax in (ax_ok, ax_shift, ax_lag):
         _style_axes(ax)
         ax.set_xscale("log")
+    for motion in motions:  # arm lag: only the tracking variant measures it
+        pts = sorted((r for r in rows if r.get("variant") == "track" and r["motion"] == motion
+                      and r["speed_cm_s"] > 0), key=lambda r: r["speed_cm_s"])
+        if pts:
+            ax_lag.plot([r["speed_cm_s"] for r in pts], [r["lag_median"] for r in pts], color=MOTION_STYLE[motion],
+                        lw=2.4, marker="o", ms=4, zorder=3)
+            ax_lag.plot([r["speed_cm_s"] for r in pts], [r["lag_p90"] for r in pts], color=MOTION_STYLE[motion],
+                        lw=1, ls="--", zorder=3)
+    lag_pts = [r for r in rows if r.get("variant") == "track" and r["speed_cm_s"] > 0]
+    if lag_pts:
+        v = np.array(sorted({r["speed_cm_s"] for r in lag_pts}))
+        ax_lag.plot(v, 10 * v * 0.2, color=INK_2, lw=0.8, ls="-.")
+        ax_lag.annotate("speed × 0.2 s", (v[-1], 20 * v[-1] / 10), (-4, 6), textcoords="offset points", ha="right",
+                        color=INK_2, fontsize=8)
+    ax_lag.set_yscale("log")
+    ax_lag.set_ylabel("gripper behind the cube at grasp height\n(mm; median, dashed = 90th pct)", color=INK_2,
+                      fontsize=9)
+    ax_lag.set_title("Tracking: the arm lags behind", color=INK, fontsize=10, loc="left")
     for variant in variants:
         ls, lw, vlabel = VARIANT_STYLE[variant]
         sel = [r for r in rows if r.get("variant", "once") == variant]
@@ -210,14 +228,14 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
                                    alpha=0.12, lw=0)
             ax_shift.plot(x, [r["shift_median"] for r in pts], color=color, ls=ls, lw=lw, marker="o", ms=4, zorder=3)
         ages = [r["look_age_s"] for r in sel if r["speed_cm_s"] > 0]
-        if ages:  # a straight-line move covers speed x (time since the look)
+        if ages and np.median(ages) > 0.05:  # a straight-line move covers speed x (time since the look)
             v = np.array(sorted({r["speed_cm_s"] for r in sel if r["speed_cm_s"] > 0}))
             age = float(np.median(ages))
             ax_shift.plot(v, 10 * v * age, color=INK_2, ls=ls, lw=0.8, zorder=2)
             ax_shift.annotate(f"speed × {age:.1f} s ({vlabel})", (v[-1], 10 * v[-1] * age), (-4, 4),
                               textcoords="offset points", ha="right", color=INK_2, fontsize=8)
     speeds = sorted({r["speed_cm_s"] for r in rows if r["speed_cm_s"] > 0})
-    for ax in (ax_ok, ax_shift):
+    for ax in (ax_ok, ax_shift, ax_lag):
         ax.set_xticks(speeds, [f"{v:g}" for v in speeds])
         ax.minorticks_off()
         ax.set_xlabel("hand speed (cm/s)", color=INK_2)
@@ -232,10 +250,10 @@ def plot_dynamic(rows, motions, path, variants=("once",)):
     handles = [Line2D([], [], color=MOTION_STYLE[mo], lw=2, label=mo) for mo in motions]
     handles += [Line2D([], [], color=INK_2, ls=VARIANT_STYLE[va][0], lw=VARIANT_STYLE[va][1], label=VARIANT_STYLE[va][2])
                 for va in variants]
-    leg = ax_shift.legend(handles=handles, frameon=False, fontsize=8, loc="lower right")
+    leg = fig.legend(handles=handles, frameon=False, fontsize=9, loc="lower center", ncol=len(handles))
     for text in leg.get_texts():
         text.set_color(INK)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
     fig.savefig(path, dpi=150, facecolor=SURFACE)
     plt.close(fig)
 

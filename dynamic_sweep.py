@@ -60,11 +60,13 @@ def summarize():
         ok = sum(t["outcome"] == "OK" for t in trials)
         lo, hi = wilson_interval(ok, len(trials))
         col = lambda k: np.array([float(t[k]) for t in trials if t.get(k) not in (None, "", "nan")])
-        shift, age = col("target_shift_mm"), col("look_age_s")
+        shift, age, lag = col("target_shift_mm"), col("look_age_s"), col("track_lag_mm")
         rows.append(dict(setting=name, variant=variant, motion=motion, speed_cm_s=speed, trials=len(trials), ok=ok,
                          success=ok / len(trials), ci_lo=lo, ci_hi=hi,
                          shift_median=np.median(shift), shift_p90=np.percentile(shift, 90),
-                         look_age_s=np.median(age), regrasps=sum(int(t["attempts"]) > 1 for t in trials),
+                         look_age_s=np.median(age),
+                         lag_median=np.median(lag) if len(lag) else np.nan,
+                         lag_p90=np.percentile(lag, 90) if len(lag) else np.nan, regrasps=sum(int(t["attempts"]) > 1 for t in trials),
                          regrasp_ok=sum(int(t["attempts"]) > 1 and t["outcome"] == "OK" for t in trials)))
     with open(OUT / "summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
