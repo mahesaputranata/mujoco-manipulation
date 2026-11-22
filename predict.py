@@ -37,8 +37,9 @@ class ConstantVelocityKF:
         F, Q = self._transition(t - self.t)
         self.x, self.P, self.t = F @ self.x, F @ self.P @ F.T + Q, t
 
-    def update(self, t, xy):
-        """Fuse a measured position at time t."""
+    def update(self, t, xy, meas_std=None):
+        """Fuse a measured position at time t (meas_std: this frame's noise, default MEAS_STD)."""
+        r = self.r if meas_std is None else meas_std ** 2
         xy = np.asarray(xy, float)
         if self.x is None:
             self.x, self.t = np.array([xy[0], xy[1], 0.0, 0.0]), t
@@ -46,7 +47,7 @@ class ConstantVelocityKF:
             return
         self.predict_to(t)
         H = np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]])
-        S = H @ self.P @ H.T + self.r * np.eye(2)
+        S = H @ self.P @ H.T + r * np.eye(2)
         K = self.P @ H.T @ np.linalg.inv(S)
         self.x = self.x + K @ (xy - H @ self.x)
         self.P = (np.eye(4) - K @ H) @ self.P
@@ -59,3 +60,27 @@ class ConstantVelocityKF:
     @property
     def velocity(self):
         return self.x[2:].copy()
+
+
+# v2: how much to trust a tracking frame depends on how close the gripper is. Measured on moving
+# cubes (seed-1 validation trials, 1110 frames): frame-to-frame wobble 0.72 mm with the gripper more
+# than 60 mm above the cube, 1.4 mm below; and below 60 mm the estimate also drifts as the fingers
+# cover the cube (90th percentile error 8-11 mm). Gripper height above the cube (m) -> noise (m):
+FRAME_NOISE = ((0.060, 0.0007), (0.025, 0.0015), (-1.0, 0.003))
+
+
+def frame_noise(height):
+    for above, std in FRAME_NOISE:
+        if height > above:
+            return std
+    return FRAME_NOISE[-1][1]
+
+
+# v2 dead-band: aim ahead only as far as the cube is clearly moving. In v1 the filter read estimate
+# wobble as velocity, and at slow speeds the 0.2 s lead turned it into 5-7 mm of aiming error.
+# No lead at or below SLOW, the full lead at or above FAST (m/s), linear in between.
+SLOW, FAST = 0.01, 0.02
+
+
+def lead_scale(speed):
+    return float(np.clip((speed - SLOW) / (FAST - SLOW), 0.0, 1.0))

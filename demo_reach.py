@@ -208,7 +208,8 @@ def wrap_grasp_angle(a):
     return (a + np.pi / 2) % np.pi - np.pi / 2
 
 
-def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK_HZ, say=None, psi=None, lead=0.0):
+def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK_HZ, say=None, psi=None, lead=0.0,
+                  predict_v2=False):
     """Descend onto the cube while watching it (visual servoing), close the gripper, keep following.
 
     Every camera frame: estimate the cube's pose, aim the fingertips at its centre at a height that
@@ -243,13 +244,17 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
         if seen is not None and np.linalg.norm(seen[0][:2] - expected) <= MAX_SPEED * dt + 0.01:
             est_pos, est_yaw, last_seen = np.array(seen[0], float), seen[1], data.time
             if kf is not None:
-                kf.update(data.time, est_pos[:2])
+                from predict import frame_noise
+                height = data.site(TCP_SITE).xpos[2] - est_pos[2]  # fingertips above the cube's centre
+                kf.update(data.time, est_pos[:2], frame_noise(height) if predict_v2 else None)
         else:
             lost += 1
         aim = est_pos[:2].copy()
         if kf is not None and kf.x is not None:
             # A straight-line extrapolation goes stale when the cube turns while unseen: cap it.
-            aim = kf.position_at(min(data.time + lead, last_seen + MAX_BLIND))
+            from predict import lead_scale
+            eff = lead * (lead_scale(np.linalg.norm(kf.velocity)) if predict_v2 else 1.0)
+            aim = kf.position_at(min(data.time + eff, last_seen + MAX_BLIND))
             pending.append((data.time + lead, aim.copy()))
         while pending and pending[0][0] <= data.time + 1e-9:  # predictions whose time has come
             pred_errs.append(np.linalg.norm(pending.pop(0)[1] - data.body("cube").xpos[:2]))
@@ -291,7 +296,7 @@ def track_descent(model, data, step, perceive, cube_pos, yaw, align, m, hz=TRACK
 
 
 def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries=0, ik_restarts=8, log=None,
-                   metrics=None, arrive=True, look_again=False, track=False, predict_lead=0.0):
+                   metrics=None, arrive=True, look_again=False, track=False, predict_lead=0.0, predict_v2=False):
     """Run one attempt (plus `retries` re-grasps). Returns (outcome, grasp attempts used).
 
     `step(q_cmd, grip)` advances the simulation by one physics step.
@@ -352,7 +357,7 @@ def pick_and_place(model, data, step, perceive=ground_truth, align=True, retries
                 yield from run_plan(model, data, now["plan"][:1], step)  # to above the cube
                 psi0 = quat_turn(now["quat"])
                 psi = track_descent(model, data, step, perceive, now["cube_pos"], yaw, align, m, say=say, psi=psi0,
-                                    lead=predict_lead)
+                                    lead=predict_lead, predict_v2=predict_v2)
                 # The cube is in the fingers now (or missed): plan lift, carry and place from here.
                 here = data.site(TCP_SITE).xpos.copy()
                 new_plan, ok, new_quat = make_plan(model, data, here, psi, align, ik_restarts, log, angles=[psi])

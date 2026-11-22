@@ -210,7 +210,8 @@ def setup_trial(trial, args):
                              arrive=not (baseline or args.no_arrive),
                              look_again=args.look_again and not baseline,
                              track=args.track and not baseline,
-                             predict_lead=0.0 if baseline else args.predict)
+                             predict_lead=0.0 if baseline else args.predict,
+                             predict_v2=args.predict_v2)
 
 
 def controller_for(trial, args):
@@ -289,7 +290,7 @@ def default_tag(args):
     if args.track:
         parts.append("track")
     if args.predict:
-        parts.append(f"predict{args.predict:g}")
+        parts.append(f"predict{args.predict:g}" + ("v2" if args.predict_v2 else ""))
     if args.perception == "camera":
         parts.append("camera")
         if args.calibration != "ideal":
@@ -427,6 +428,8 @@ def add_scenario_args(parser):
                         help="track the cube during the descent and the grasp (visual servoing, Option B)")
     parser.add_argument("--predict", type=float, default=0.0, metavar="LEAD",
                         help="with --track: predict the cube's motion and aim LEAD seconds ahead (Option C1)")
+    parser.add_argument("--predict-v2", action="store_true",
+                        help="with --predict: height-dependent frame trust and a speed dead-band (C1 v2)")
     parser.add_argument("--motion", choices=["static", "circle", "sway", "jitter"],
                         help="dynamic target: a hand holds the cube and moves it (hand_motion.py)")
     parser.add_argument("--speed", type=float, default=0.0, help="hand speed in cm/s (with --motion)")

@@ -8,6 +8,8 @@ variants, each compared on the same trials:
     track   watches the cube every frame of the descent and the grasp (Option B, visual servoing)
     predict tracks and aims 0.2 s ahead with a Kalman filter (Option C1). The lead was fixed from
             Option B's measured lag and checked on other trials (seed 1), not tuned on these.
+    predict2  C1 v2: frame trust set by the gripper's height and a speed dead-band, both from
+            measurements on the seed-1 trials
 
     python dynamic_sweep.py            # run missing settings (resumable), then summarize and plot
     python dynamic_sweep.py --plot     # only summarize and plot existing results
@@ -29,7 +31,8 @@ MOTIONS = ["circle", "sway", "jitter"]
 SPEEDS = [0.25, 0.5, 1, 2, 5, 10]  # cm/s
 TOLERANCE = 0.95
 VARIANTS = {"once": [], "again": ["--look-again"], "track": ["--track"],
-            "predict": ["--track", "--predict", "0.2"]}  # variant -> extra eval_place.py flags
+            "predict": ["--track", "--predict", "0.2"],
+            "predict2": ["--track", "--predict", "0.2", "--predict-v2"]}  # variant -> extra eval_place.py flags
 
 
 def settings():
